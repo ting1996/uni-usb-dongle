@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Uni USB Dongle</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">M62-12F-Kit</p>
+        <h1>Uni USB Dongle</h1>
+        <p>Configure and update your dongle over USB.</p>
+      </header>
+
+      <section>
+        <div class="section-heading">
+          <div>
+            <h2>Connection</h2>
+            <p id="connection">Disconnected</p>
+          </div>
+          <div class="actions">
+            <select id="transport" aria-label="USB connection method">
+              <option value="hid">WebHID</option>
+              <option value="serial">USB serial (legacy firmware)</option>
+            </select>
+            <button id="connect">Connect</button>
+            <button id="disconnect" disabled>Disconnect</button>
+          </div>
+        </div>
+        <p id="device-status" role="status">No device status received.</p>
+        <div class="actions">
+          <select id="output-profile" aria-label="USB output profile" disabled>
+            <option value="0">Generic HID</option>
+            <option value="1">Xbox 360 (XInput)</option>
+            <option value="2">DualShock 4 (PS4)</option>
+            <option value="3">Switch Pro</option>
+            <option value="4">DualSense (PS5)</option>
+          </select>
+          <button id="apply-profile" disabled>Apply profile</button>
+        </div>
+        <p id="profile-status">Connect to inspect USB output profile.</p>
+      </section>
+
+      <section>
+        <h2>Controllers</h2>
+        <p id="pairing-status">Connect to read controller slots.</p>
+        <div class="actions">
+          <button id="discover" disabled>Discover</button>
+          <select id="discovered" aria-label="Discovered Bluetooth device"><option value="">Choose a device</option></select>
+          <button id="pair" disabled>Pair controller</button>
+          <button id="pair-audio" disabled>Pair headphone</button>
+        </div>
+        <p>DualSense: hold Create + PS until the light flashes. Theater U: hold Power/Bluetooth until “Pairing”. Then discover and choose the device.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Slot</th><th>Address</th><th>State</th><th>Output</th><th>Actions</th></tr>
+            </thead>
+            <tbody id="controllers"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2>Audio</h2>
+        <p id="audio-status">Connect to read audio capability.</p>
+        <p>Select “Bluetooth Gamepads + Stereo Audio” as your computer’s sound output. Stereo playback uses SBC at 44.1 kHz. Adjust volume on your computer or neckband speaker.</p>
+      </section>
+
+      <section>
+        <h2>Firmware update</h2>
+        <p class="warning">
+          The current SDK partition map aliases inactive FW slot 1 with
+          <code>mfg</code> at <code>0x210000</code>. Updating may erase
+          manufacturing data. This browser updater is not a recovery path;
+          keep UART ROM recovery available.
+        </p>
+        <label for="firmware">SDK XZ OTA package</label>
+        <input id="firmware" type="file" accept=".ota,.xz">
+        <label class="consent">
+          <input id="confirm-mfg" type="checkbox">
+          I have backed up the flash or confirmed the overlapping mfg data is disposable.
+        </label>
+        <button id="update" disabled>Start OTA</button>
+      </section>
+
+      <section>
+        <h2>Activity</h2>
+        <pre id="output" aria-live="polite"></pre>
+      </section>
+    </main>
+    <script type="module" src="./app.mjs"></script>
+  </body>
+</html>

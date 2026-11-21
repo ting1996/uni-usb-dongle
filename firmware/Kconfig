@@ -1,0 +1,3 @@
+mainmenu "USB dongle firmware configuration"
+
+source "$BL_SDK_BASE/Kconfig"
