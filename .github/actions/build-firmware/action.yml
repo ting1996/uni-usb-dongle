@@ -1,0 +1,110 @@
+name: Build BL616 Firmware
+description: Cache Bouffalo SDK and T-Head RISC-V toolchain, build BL616 firmware, verify slot 0 size, and package artifacts.
+
+inputs:
+  board:
+    description: Target board profile (m62_12f or bl616dk)
+    required: false
+    default: "m62_12f"
+  out-dir:
+    description: Output directory for packaged firmware artifacts
+    required: false
+    default: "dist/firmware"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install build dependencies
+      shell: bash
+      run: |
+        if ! command -v ninja >/dev/null 2>&1; then
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+        fi
+
+    - name: Cache Bouffalo SDK
+      id: cache-sdk
+      uses: actions/cache@v4
+      with:
+        path: ~/bouffalo_sdk
+        key: bouffalo-sdk-master-v1
+
+    - name: Clone Bouffalo SDK
+      if: steps.cache-sdk.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        git clone --depth 1 https://github.com/bouffalolab/bouffalo_sdk.git "$HOME/bouffalo_sdk"
+
+    - name: Cache T-Head RISC-V toolchain
+      id: cache-toolchain
+      uses: actions/cache@v4
+      with:
+        path: ~/toolchain_gcc_t-head_linux
+        key: thead-toolchain-linux-v1
+
+    - name: Clone T-Head RISC-V toolchain
+      if: steps.cache-toolchain.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        git clone --depth 1 https://github.com/bouffalolab/toolchain_gcc_t-head_linux.git "$HOME/toolchain_gcc_t-head_linux"
+
+    - name: Ensure tool permissions
+      shell: bash
+      run: |
+        chmod -R +x "$HOME/toolchain_gcc_t-head_linux/bin"
+        if [ -d "$HOME/bouffalo_sdk/tools/cmake/bin" ]; then
+          chmod -R +x "$HOME/bouffalo_sdk/tools/cmake/bin"
+        fi
+        if [ -f "$HOME/bouffalo_sdk/tools/bflb_tools/bflb_fw_post_proc/bflb_fw_post_proc-ubuntu" ]; then
+          chmod +x "$HOME/bouffalo_sdk/tools/bflb_tools/bflb_fw_post_proc/bflb_fw_post_proc-ubuntu"
+        fi
+
+    - name: Build firmware
+      shell: bash
+      run: |
+        export PATH="$HOME/toolchain_gcc_t-head_linux/bin:$PATH"
+        make -C firmware \
+          BOARD="${{ inputs.board }}" \
+          BL_SDK_BASE="$HOME/bouffalo_sdk" \
+          CROSS_COMPILE="$HOME/toolchain_gcc_t-head_linux/bin/riscv64-unknown-elf-"
+
+    - name: Verify slot 0 size and package artifacts
+      shell: bash
+      run: |
+        set -euo pipefail
+        BUILD_OUT="firmware/build/build_out"
+        APP_BIN="${BUILD_OUT}/uni_usb_dongle_bl616.bin"
+        MAX_BYTES=2097152
+
+        if [ ! -s "${APP_BIN}" ]; then
+          echo "Error: Missing or empty firmware image: ${APP_BIN}" >&2
+          exit 1
+        fi
+
+        SIZE=$(wc -c < "${APP_BIN}" | tr -d '[:space:]')
+        echo "Built ${APP_BIN}: ${SIZE} bytes (slot 0 limit: ${MAX_BYTES} bytes)"
+        if [ "${SIZE}" -gt "${MAX_BYTES}" ]; then
+          echo "Error: ${APP_BIN} (${SIZE} bytes) exceeds 2 MiB slot 0 limit (${MAX_BYTES} bytes)" >&2
+          exit 1
+        fi
+
+        OUT_DIR="${{ inputs.out-dir }}"
+        mkdir -p "${OUT_DIR}"
+        for f in \
+          uni_usb_dongle_bl616.bin \
+          uni_usb_dongle_bl616.bin.ota \
+          uni_usb_dongle_bl616.xz \
+          uni_usb_dongle_bl616.xz.ota \
+          uni_usb_dongle_bl616.elf \
+          uni_usb_dongle_bl616.map
+        do
+          if [ -f "${BUILD_OUT}/${f}" ]; then
+            cp "${BUILD_OUT}/${f}" "${OUT_DIR}/${f}"
+          fi
+        done
+
+        (
+          cd "${OUT_DIR}"
+          sha256sum uni_usb_dongle_bl616.* > SHA256SUMS.txt
+        )
+        cat "${OUT_DIR}/SHA256SUMS.txt"

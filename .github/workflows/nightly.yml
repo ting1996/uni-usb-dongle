@@ -1,0 +1,185 @@
+name: Nightly Build
+
+on:
+  schedule:
+    - cron: "0 17 * * *" # 12:00 AM UTC+7 (17:00 UTC) every day
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Run nightly build even if no changes since last nightly tag
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  check-changes:
+    name: Check for Changes
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.eval.outputs.should_build }}
+      head_sha: ${{ steps.eval.outputs.head_sha }}
+      short_sha: ${{ steps.eval.outputs.short_sha }}
+      prev_sha: ${{ steps.eval.outputs.prev_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Evaluate changes since last nightly tag
+        id: eval
+        run: |
+          set -euo pipefail
+          HEAD_SHA="$(git rev-parse HEAD)"
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          PREV_SHA="$(git rev-parse -q --verify "refs/tags/nightly^{commit}" || true)"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force }}" = "true" ]; then
+            SHOULD_BUILD="true"
+            echo "Manual forced run requested; proceeding with nightly build for ${SHORT_SHA}."
+          elif [ -z "${PREV_SHA}" ]; then
+            SHOULD_BUILD="true"
+            echo "No previous nightly tag found; proceeding with initial nightly build for ${SHORT_SHA}."
+          elif [ "${HEAD_SHA}" != "${PREV_SHA}" ]; then
+            SHOULD_BUILD="true"
+            echo "Changes detected since last nightly (${PREV_SHA} -> ${HEAD_SHA})."
+          else
+            SHOULD_BUILD="false"
+            echo "No changes since last nightly build at ${HEAD_SHA}; skipping build."
+          fi
+
+          {
+            echo "should_build=${SHOULD_BUILD}"
+            echo "head_sha=${HEAD_SHA}"
+            echo "short_sha=${SHORT_SHA}"
+            echo "prev_sha=${PREV_SHA}"
+          } >> "${GITHUB_OUTPUT}"
+
+  host-tests:
+    name: Host Tests
+    needs: check-changes
+    if: needs.check-changes.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Configure and build C11 core
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+
+      - name: Run C11 CTest suite
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Run Python unit tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Run WebHID Node tests
+        run: node --test tests/test_web_protocol.mjs tests/test_web_hid.mjs tests/test_web_radio.mjs tests/test_web_pages.mjs
+
+  firmware-build:
+    name: Firmware Build (BL616 m62_12f)
+    needs: check-changes
+    if: needs.check-changes.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build BL616 firmware
+        uses: ./.github/actions/build-firmware
+        with:
+          board: m62_12f
+          out-dir: dist/firmware
+
+      - name: Upload nightly firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: m62-firmware-nightly
+          path: dist/firmware
+          retention-days: 30
+
+  publish-nightly:
+    name: Publish Nightly Pre-release
+    needs: [check-changes, host-tests, firmware-build]
+    if: needs.check-changes.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download nightly firmware artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: m62-firmware-nightly
+          path: dist/firmware
+
+      - name: Update nightly tag and publish pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ needs.check-changes.outputs.head_sha }}
+          SHORT_SHA: ${{ needs.check-changes.outputs.short_sha }}
+          PREV_SHA: ${{ needs.check-changes.outputs.prev_sha }}
+        run: |
+          set -euo pipefail
+          NIGHTLY_DATE="$(date -u +'%Y-%m-%d')"
+          TITLE="Nightly Build (${NIGHTLY_DATE} - ${SHORT_SHA})"
+
+          {
+            echo "## Automated Nightly Build"
+            echo ""
+            echo "- **Commit:** \`${HEAD_SHA}\`"
+            echo "- **Board Profile:** \`m62_12f\`"
+            echo ""
+            echo "### Changes"
+            if [ -n "${PREV_SHA}" ] && [ "${PREV_SHA}" != "${HEAD_SHA}" ]; then
+              git log --no-merges --pretty=format:"- %h %s (%an)" "${PREV_SHA}..${HEAD_SHA}" || true
+              echo ""
+            else
+              git log -n 10 --no-merges --pretty=format:"- %h %s (%an)" "${HEAD_SHA}" || true
+              echo ""
+            fi
+            echo ""
+            echo "### SHA-256 Checksums"
+            echo '```'
+            cat dist/firmware/SHA256SUMS.txt
+            echo '```'
+          } > nightly-notes.md
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f nightly "${HEAD_SHA}"
+          git push origin refs/tags/nightly --force
+
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release edit nightly \
+              --title "${TITLE}" \
+              --notes-file nightly-notes.md \
+              --prerelease
+            gh release upload nightly dist/firmware/* --clobber
+          else
+            gh release create nightly dist/firmware/* \
+              --title "${TITLE}" \
+              --notes-file nightly-notes.md \
+              --prerelease
+          fi

@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  host-tests:
+    name: Host Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Configure and build C11 core
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+
+      - name: Run C11 CTest suite
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Run Python unit tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Run WebHID Node tests
+        run: node --test tests/test_web_protocol.mjs tests/test_web_hid.mjs tests/test_web_radio.mjs tests/test_web_pages.mjs
+
+  firmware-build:
+    name: Firmware Build (BL616 m62_12f)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build BL616 firmware
+        uses: ./.github/actions/build-firmware
+        with:
+          board: m62_12f
+          out-dir: dist/firmware
+
+      - name: Upload release firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: m62-firmware-release
+          path: dist/firmware
+          retention-days: 30
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [host-tests, firmware-build]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download release firmware artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: m62-firmware-release
+          path: dist/firmware
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" dist/firmware/* --clobber
+          else
+            gh release create "${TAG}" dist/firmware/* \
+              --title "${TAG}" \
+              --generate-notes
+          fi
