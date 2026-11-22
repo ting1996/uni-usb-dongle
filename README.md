@@ -101,7 +101,7 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 Browser transport tests use Node.js:
 
 ```sh
-node --test tests/test_web_protocol.mjs tests/test_web_hid.mjs tests/test_web_radio.mjs
+node --test tests/test_web_protocol.mjs tests/test_web_hid.mjs tests/test_web_radio.mjs tests/test_web_pages.mjs
 ```
 
 ### Windows 10/11 (PowerShell, Native)
@@ -128,8 +128,11 @@ prerequisites, Windows kernel tools (`tools/usb_hid_check.py`,
 For reproducible checks on the connected M62, including the safe live CDC
 state/OTA probe, see [the device-validation runbook](docs/device-validation.md).
 
-Serve the browser panel from a secure local origin (for example
-`http://localhost:8000`) in desktop Chrome or Edge with WebHID support:
+Open the hosted GitHub Pages deployment at
+`https://ting1996.github.io/uni-usb-dongle/` (automatically built and
+deployed by `.github/workflows/deploy-pages.yml`), or serve the browser panel
+locally from a secure origin (for example `http://localhost:8000`) in desktop
+Chrome or Edge with WebHID support:
 
 ```sh
 python3 -m http.server 8000 --directory web

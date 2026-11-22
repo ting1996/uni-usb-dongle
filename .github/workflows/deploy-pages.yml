@@ -1,0 +1,57 @@
+name: Deploy WebHID to GitHub Pages
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "web/**"
+      - "tools/build_web_pages.mjs"
+      - "tests/test_web_*.mjs"
+      - ".github/workflows/deploy-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run WebHID host tests
+        run: node --test tests/test_web_protocol.mjs tests/test_web_hid.mjs tests/test_web_radio.mjs tests/test_web_pages.mjs
+
+      - name: Stage static Pages bundle
+        run: node tools/build_web_pages.mjs --out _site
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./_site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

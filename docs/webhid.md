@@ -30,15 +30,20 @@ after the final HID update (partition-table age 27, FW entry age 16).
 
 ## Connect from the browser
 
-1. Serve the panel from the project root:
+You can either use the hosted GitHub Pages deployment at
+`https://ting1996.github.io/uni-usb-dongle/` (once GitHub Pages is enabled in
+repository settings) or serve the panel locally:
+
+1. If running locally, serve the panel from the project root:
 
    ```sh
    python3 -m http.server 8000 --bind 127.0.0.1 --directory web
    ```
 
-2. Open `http://localhost:8000` in desktop Chrome or Edge. WebHID requires a
-   secure context such as localhost or HTTPS, plus a user gesture and device
-   selection. Browser support and feature APIs are described in the
+2. Open `https://ting1996.github.io/uni-usb-dongle/` or `http://localhost:8000`
+   in desktop Chrome or Edge. WebHID requires a secure context such as localhost
+   or HTTPS, plus a user gesture and device selection. Browser support and
+   feature APIs are described in the
    [Chrome WebHID documentation](https://developer.chrome.com/docs/capabilities/hid).
 3. On Windows, ensure the **native USB** device is available to Windows HID.
    If it is forwarded to WSL, use `usbipd list` in PowerShell to identify the
@@ -61,6 +66,20 @@ after the final HID update (partition-table age 27, FW entry age 16).
 
 When native USB is released to Windows, its WSL ttyACM/hidraw nodes disappear;
 Linux tools cannot access it until it is attached to WSL again.
+
+## GitHub Pages deployment
+
+The workflow in [`.github/workflows/deploy-pages.yml`](../.github/workflows/deploy-pages.yml)
+runs the WebHID Node.js tests, stages a static bundle via
+`node tools/build_web_pages.mjs --out _site` (converting `.mjs` ES modules to
+`.js` with updated imports and adding `.nojekyll`), and deploys to GitHub Pages
+at `https://ting1996.github.io/uni-usb-dongle/`.
+
+To enable hosting on GitHub:
+1. Open repository **Settings → Pages** and set **Build and deployment → Source**
+   to **GitHub Actions**.
+2. Trigger **Deploy WebHID to GitHub Pages** in the **Actions** tab (or push to
+   `main` touching `web/`).
 
 ## Verify through Linux hidraw
 

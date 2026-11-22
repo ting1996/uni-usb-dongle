@@ -1359,7 +1359,8 @@ function Invoke-WebTests {
     $allFiles = @(
         (Join-Paths $Script:RepoRoot @("tests", "test_web_protocol.mjs")),
         (Join-Paths $Script:RepoRoot @("tests", "test_web_hid.mjs")),
-        (Join-Paths $Script:RepoRoot @("tests", "test_web_radio.mjs"))
+        (Join-Paths $Script:RepoRoot @("tests", "test_web_radio.mjs")),
+        (Join-Paths $Script:RepoRoot @("tests", "test_web_pages.mjs"))
     )
 
     $selectedFiles = $allFiles
