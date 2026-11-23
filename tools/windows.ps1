@@ -259,9 +259,10 @@ function Find-CommandExe {
 
 function Find-BouffaloSdkBase {
     $candidates = @()
-    if ($env:BL_SDK_BASE) {
+    if (-not [string]::IsNullOrWhiteSpace($env:BL_SDK_BASE)) {
         $candidates += $env:BL_SDK_BASE
     }
+    $candidates += (Join-Paths $Script:RepoRoot @("third_party", "bouffalo_sdk"))
     $candidates += (Join-Path (Split-Path -Parent $Script:RepoRoot) "bouffalo_sdk")
     foreach ($candidate in $candidates) {
         if ($candidate -and (Test-Path -LiteralPath (Join-Path $candidate "project.build") -PathType Leaf)) {
@@ -911,6 +912,21 @@ function Invoke-HostBuild {
     Write-Host "Host build succeeded ($BuildConfig): $ResolvedBuildDir"
 }
 
+function ConvertTo-NormalizedPathForCompare {
+    param([string]$PathValue)
+    if ([string]::IsNullOrWhiteSpace($PathValue)) {
+        return ""
+    }
+    $slashed = $PathValue.Trim().Replace("/", "\")
+    $full = $slashed
+    try {
+        $full = [System.IO.Path]::GetFullPath($slashed)
+    } catch {
+        $full = $slashed
+    }
+    return $full.TrimEnd("\")
+}
+
 function Invoke-FirmwareBuild {
     param(
         [Parameter(Mandatory = $true)][psobject]$EnvInfo,
@@ -918,7 +934,7 @@ function Invoke-FirmwareBuild {
     )
     $fw = $EnvInfo.FirmwareTools
     if (-not $fw.SdkBase) {
-        throw "Bouffalo SDK (BL_SDK_BASE) was not found. Set `$env:BL_SDK_BASE or check out bouffalo_sdk adjacent to this repository."
+        throw "Bouffalo SDK (BL_SDK_BASE) was not found. Run 'git submodule update --init third_party/bouffalo_sdk' or set `$env:BL_SDK_BASE."
     }
     if ($fw.ToolchainFormat -ne "pe") {
         $tcDetail = if ($fw.ToolchainBin) {
@@ -936,10 +952,35 @@ function Invoke-FirmwareBuild {
     $fwCache = Join-Path $fwBuildDir "CMakeCache.txt"
     $fwMakefile = Join-Path $fwBuildDir "Makefile"
     if (Test-Path -LiteralPath $fwCache -PathType Leaf) {
-        $cacheHead = Get-Content -LiteralPath $fwCache -TotalCount 30 -ErrorAction SilentlyContinue
-        $cacheJoined = $cacheHead -join "`n"
-        if ($cacheJoined -match "/mnt/|Unix Makefiles") {
-            Write-Host "Cleaning stale non-Windows firmware build cache in $fwBuildDir ..."
+        $cacheRaw = Get-Content -LiteralPath $fwCache -Raw -ErrorAction SilentlyContinue
+        if ($null -eq $cacheRaw) { $cacheRaw = "" }
+        $expectedSdkCmake = ConvertTo-NormalizedPathForCompare (Join-Path $fw.SdkBase "cmake")
+        $expectedSdkBase = ConvertTo-NormalizedPathForCompare $fw.SdkBase
+        $staleReason = $null
+
+        if ($cacheRaw -match "/mnt/|Unix Makefiles") {
+            $staleReason = "non-Windows CMake cache"
+        } else {
+            $sdkDirMatch = [regex]::Match($cacheRaw, "(?m)^bouffalo_sdk_DIR(?::[^=]*)?=(.+)$")
+            if ($sdkDirMatch.Success) {
+                $cachedSdkCmake = ConvertTo-NormalizedPathForCompare $sdkDirMatch.Groups[1].Value
+                if (-not [string]::Equals($cachedSdkCmake, $expectedSdkCmake, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $staleReason = "bouffalo_sdk_DIR points to a different SDK"
+                }
+            }
+            if (-not $staleReason) {
+                $sdkBaseMatch = [regex]::Match($cacheRaw, "(?m)^BL_SDK_BASE(?::[^=]*)?=(.+)$")
+                if ($sdkBaseMatch.Success) {
+                    $cachedSdkBase = ConvertTo-NormalizedPathForCompare $sdkBaseMatch.Groups[1].Value
+                    if (-not [string]::Equals($cachedSdkBase, $expectedSdkBase, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        $staleReason = "BL_SDK_BASE points to a different SDK"
+                    }
+                }
+            }
+        }
+
+        if ($staleReason) {
+            Write-Host "Cleaning stale firmware build cache in $fwBuildDir ($staleReason) ..."
             Remove-Item -LiteralPath $fwBuildDir -Recurse -Force
         }
     } elseif (Test-Path -LiteralPath $fwMakefile -PathType Leaf) {

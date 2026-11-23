@@ -5,7 +5,7 @@ if(POLICY CMP0141)
         "$<$<C_COMPILER_ID:MSVC>:$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>>"
         CACHE STRING "MSVC debug information format")
 endif()
-project(uni_usb_dongle VERSION 0.1.0 LANGUAGES C)
+project(uni_usb_dongle VERSION 1.2.0 LANGUAGES C)
 
 include(CTest)
 

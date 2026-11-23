@@ -1,4 +1,4 @@
-BL_SDK_BASE ?= $(abspath ../../bouffalo_sdk)
+BL_SDK_BASE ?= $(abspath ../third_party/bouffalo_sdk)
 SDK_DEMO_PATH := $(abspath .)
 CHIP ?= bl616
 BUILD_DIR ?= build
@@ -43,6 +43,9 @@ endif
 export BL_SDK_BASE
 export SDK_DEMO_PATH
 
+ifeq ($(wildcard $(subst \,/,$(BL_SDK_BASE))/project.build),)
+$(error Bouffalo SDK not found at $(BL_SDK_BASE). Run 'git submodule update --init third_party/bouffalo_sdk' or set BL_SDK_BASE)
+endif
 include $(BL_SDK_BASE)/project.build
 
 M62_APP_IMAGE := $(BUILD_DIR)/build_out/uni_usb_dongle_bl616.bin

@@ -82,10 +82,13 @@ documented in [WebHID configuration and OTA](webhid.md). The management interfac
 is currently `/dev/hidraw0`; it requires read/write access or an authorized root
 test process, unlike the read-only joystick checks above.
 
-The SDK and toolchain used in this workspace are:
+`BL_SDK_BASE` defaults to the pinned `third_party/bouffalo_sdk` submodule
+(initialize with `git submodule update --init third_party/bouffalo_sdk`). Set
+the toolchain paths (and optionally export `BL_SDK_BASE` explicitly):
 
 ```sh
-export BL_SDK_BASE=/mnt/d/Workspace/bouffalo_sdk
+# Optional: defaults to third_party/bouffalo_sdk when omitted
+export BL_SDK_BASE="$(pwd)/third_party/bouffalo_sdk"
 export TOOLCHAIN_BIN=/mnt/d/Workspace/Xuantie-900-gcc-elf-newlib-x86_64-V3.2.0/bin
 export PATH="$TOOLCHAIN_BIN:$PATH"
 ```

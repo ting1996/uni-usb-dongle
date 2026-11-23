@@ -13,22 +13,24 @@ Existing Linux workflows remain intact.
 | **C11 Build Tools** | Host C library & unit tests | Visual Studio 2022/2026 ("Desktop development with C++", CMake 3.20+, Ninja, MSVC `cl.exe`) or standalone CMake + Ninja + GCC/Clang |
 | **Python 3.8+** | Test suite, kernel HID/audio checks, serial tools | Standard CPython (e.g. Python 3.15); install `pyserial` (`python -m pip install pyserial`) if using COM port tools |
 | **Node.js 20+** | Browser WebHID/protocol tests | Standard `node.exe` on `PATH` (or fallback to VS Code / Antigravity Electron in `ELECTRON_RUN_AS_NODE=1` mode) |
-| **Bouffalo SDK** | Firmware builds & UART flashing | Checked out at `..\bouffalo_sdk` or `$env:BL_SDK_BASE`; includes `BLFlashCommand.exe`, `bflb_fw_post_proc.exe`, and GNU Make |
+| **Bouffalo SDK** | Firmware builds & UART flashing | Pinned submodule at `third_party\bouffalo_sdk` (initialize with `git submodule update --init third_party/bouffalo_sdk`), `$env:BL_SDK_BASE`, or legacy sibling `..\bouffalo_sdk`; includes `BLFlashCommand.exe`, `bflb_fw_post_proc.exe`, and GNU Make |
 | **Xuantie RISC-V GCC (MinGW)** | Native Windows firmware build | Windows PE toolchain (`D:\Workspace\Xuantie-900-gcc-elf-newlib-mingw-V3.2.0\bin` or `$env:TOOLCHAIN_BIN`) |
 | **CH340 Driver** | USB-UART console & ROM recovery | QinHeng CH340 USB-to-UART bridge driver (`VID:PID 1A86:7523`) for the kit's built-in USB connector |
 
 ### Environment Variables (Optional Overrides)
 
-`tools\windows.ps1` auto-discovers standard installations and sibling
-directories (`..\bouffalo_sdk`, `..\Xuantie-*-mingw-*\bin`), and automatically
-skips uninstalled Microsoft Store `python.exe`/`py.exe` redirector stubs. You
-can override discovery with:
+`tools\windows.ps1` auto-discovers standard installations, the pinned submodule
+at `third_party\bouffalo_sdk` (initialize via
+`git submodule update --init third_party/bouffalo_sdk`), the legacy sibling
+fallback `..\bouffalo_sdk`, and sibling `..\Xuantie-*-mingw-*\bin` toolchains,
+and automatically skips uninstalled Microsoft Store `python.exe`/`py.exe`
+redirector stubs. You can override discovery with:
 
 ```powershell
 $env:PYTHON_EXE    = "C:\Users\Nghiep\AppData\Local\Python\bin\python.exe"
 $env:PYSERIAL_PATH = "C:\Path\To\site-packages"   # optional extra site-packages
 $env:NODE_EXE      = "C:\Program Files\nodejs\node.exe"
-$env:BL_SDK_BASE   = "D:\Workspace\bouffalo_sdk"
+$env:BL_SDK_BASE   = "$PWD\third_party\bouffalo_sdk"
 $env:TOOLCHAIN_BIN = "D:\Workspace\Xuantie-900-gcc-elf-newlib-mingw-V3.2.0\bin"
 ```
 
@@ -99,8 +101,11 @@ Build the host C library (`dongle_core.lib`) and 8 host C tests into
 to avoid `mspdbsrv.exe` hangs) and `/experimental:c11atomics` so C11
 `<stdatomic.h>` compiles cleanly under MSVC. `Invoke-FirmwareBuild` strips any
 directory containing `sh.exe` from the build `PATH` (required by CMake `MinGW
-Makefiles`) and cleans stale non-Windows (`/mnt/`) firmware CMake caches if
-present.
+Makefiles`), cleans stale non-Windows (`/mnt/`) firmware CMake caches if
+present, and automatically cleans `firmware\build` when cached `BL_SDK_BASE` or
+`bouffalo_sdk_DIR` entries in `firmware\build\CMakeCache.txt` do not match the
+resolved SDK checkout (for example when switching between
+`third_party\bouffalo_sdk`, legacy `..\bouffalo_sdk`, and `$env:BL_SDK_BASE`).
 
 `BOARD=bl616dk` remains a reference smoke configuration and must not be flashed
 to the M62-12F-Kit.

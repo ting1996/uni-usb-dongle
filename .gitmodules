@@ -1,0 +1,4 @@
+[submodule "third_party/bouffalo_sdk"]
+	path = third_party/bouffalo_sdk
+	url = https://github.com/ting1996/bouffalo_sdk.git
+	branch = uni-usb-dongle

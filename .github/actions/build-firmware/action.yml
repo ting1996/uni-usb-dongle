@@ -1,5 +1,5 @@
 name: Build BL616 Firmware
-description: Cache Bouffalo SDK and T-Head RISC-V toolchain, build BL616 firmware, verify slot 0 size, and package artifacts.
+description: Verify the third_party/bouffalo_sdk submodule and T-Head RISC-V toolchain, build BL616 firmware, verify slot 0 size, and package artifacts.
 
 inputs:
   board:
@@ -22,18 +22,15 @@ runs:
           sudo apt-get install -y ninja-build
         fi
 
-    - name: Cache Bouffalo SDK
-      id: cache-sdk
-      uses: actions/cache@v4
-      with:
-        path: ~/bouffalo_sdk
-        key: bouffalo-sdk-master-v1
-
-    - name: Clone Bouffalo SDK
-      if: steps.cache-sdk.outputs.cache-hit != 'true'
+    - name: Verify Bouffalo SDK submodule
       shell: bash
       run: |
-        git clone --depth 1 https://github.com/bouffalolab/bouffalo_sdk.git "$HOME/bouffalo_sdk"
+        set -euo pipefail
+        SDK_BASE="${{ github.workspace }}/third_party/bouffalo_sdk"
+        if [ ! -f "${SDK_BASE}/project.build" ]; then
+          git submodule update --init --depth 1 third_party/bouffalo_sdk
+        fi
+        test -f "${SDK_BASE}/project.build"
 
     - name: Cache T-Head RISC-V toolchain
       id: cache-toolchain
@@ -51,21 +48,23 @@ runs:
     - name: Ensure tool permissions
       shell: bash
       run: |
+        SDK_BASE="${{ github.workspace }}/third_party/bouffalo_sdk"
         chmod -R +x "$HOME/toolchain_gcc_t-head_linux/bin"
-        if [ -d "$HOME/bouffalo_sdk/tools/cmake/bin" ]; then
-          chmod -R +x "$HOME/bouffalo_sdk/tools/cmake/bin"
+        if [ -d "${SDK_BASE}/tools/cmake/bin" ]; then
+          chmod -R +x "${SDK_BASE}/tools/cmake/bin"
         fi
-        if [ -f "$HOME/bouffalo_sdk/tools/bflb_tools/bflb_fw_post_proc/bflb_fw_post_proc-ubuntu" ]; then
-          chmod +x "$HOME/bouffalo_sdk/tools/bflb_tools/bflb_fw_post_proc/bflb_fw_post_proc-ubuntu"
+        if [ -f "${SDK_BASE}/tools/bflb_tools/bflb_fw_post_proc/bflb_fw_post_proc-ubuntu" ]; then
+          chmod +x "${SDK_BASE}/tools/bflb_tools/bflb_fw_post_proc/bflb_fw_post_proc-ubuntu"
         fi
 
     - name: Build firmware
       shell: bash
       run: |
+        SDK_BASE="${{ github.workspace }}/third_party/bouffalo_sdk"
         export PATH="$HOME/toolchain_gcc_t-head_linux/bin:$PATH"
         make -C firmware \
           BOARD="${{ inputs.board }}" \
-          BL_SDK_BASE="$HOME/bouffalo_sdk" \
+          BL_SDK_BASE="${SDK_BASE}" \
           CROSS_COMPILE="$HOME/toolchain_gcc_t-head_linux/bin/riscv64-unknown-elf-"
 
     - name: Verify slot 0 size and package artifacts
