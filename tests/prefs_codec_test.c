@@ -1,0 +1,59 @@
+#include "dongle/prefs_codec.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define CHECK(expression) \
+    do { \
+        if (!(expression)) { \
+            fprintf(stderr, "Check failed at line %d: %s\n", __LINE__, #expression); \
+            exit(EXIT_FAILURE); \
+        } \
+    } while (0)
+
+int main(void)
+{
+    dongle_prefs_t prefs;
+    CHECK(dongle_prefs_init_defaults(NULL) == DONGLE_PREFS_INVALID_ARGUMENT);
+    CHECK(dongle_prefs_init_defaults(&prefs) == DONGLE_PREFS_OK);
+    CHECK(prefs.boot_profile == DONGLE_PROFILE_GENERIC);
+    CHECK(prefs.audio_codec == 0U);
+    CHECK(prefs.mic_source == DONGLE_MIC_SOURCE_AUTO);
+
+    prefs.boot_profile = DONGLE_PROFILE_DUALSENSE;
+    prefs.audio_codec = 1U;
+    prefs.mic_source = DONGLE_MIC_SOURCE_HEADPHONE;
+
+    uint8_t blob[DONGLE_PREFS_BLOB_SIZE];
+    CHECK(dongle_prefs_encode(&prefs, blob, sizeof(blob) - 1U) ==
+          DONGLE_PREFS_INVALID_ARGUMENT);
+    CHECK(dongle_prefs_encode(&prefs, blob, sizeof(blob)) == DONGLE_PREFS_OK);
+
+    dongle_prefs_t decoded;
+    CHECK(dongle_prefs_init_defaults(&decoded) == DONGLE_PREFS_OK);
+    CHECK(dongle_prefs_decode(blob, sizeof(blob), &decoded) == DONGLE_PREFS_OK);
+    CHECK(decoded.boot_profile == DONGLE_PROFILE_DUALSENSE);
+    CHECK(decoded.audio_codec == 1U);
+    CHECK(decoded.mic_source == DONGLE_MIC_SOURCE_HEADPHONE);
+
+    /* Corrupt CRC / payload -> rejected without changing decoded. */
+    blob[5] ^= 0x01U;
+    CHECK(dongle_prefs_decode(blob, sizeof(blob), &decoded) ==
+          DONGLE_PREFS_INVALID_DATA);
+    CHECK(decoded.boot_profile == DONGLE_PROFILE_DUALSENSE);
+
+    /* Invalid enum values -> rejected by encode. */
+    dongle_prefs_t invalid = prefs;
+    invalid.boot_profile = DONGLE_PROFILE_COUNT;
+    CHECK(dongle_prefs_encode(&invalid, blob, sizeof(blob)) == DONGLE_PREFS_INVALID_DATA);
+    invalid = prefs;
+    invalid.audio_codec = 2U;
+    CHECK(dongle_prefs_encode(&invalid, blob, sizeof(blob)) == DONGLE_PREFS_INVALID_DATA);
+    invalid = prefs;
+    invalid.mic_source = DONGLE_MIC_SOURCE_COUNT;
+    CHECK(dongle_prefs_encode(&invalid, blob, sizeof(blob)) == DONGLE_PREFS_INVALID_DATA);
+
+    puts("Preferences codec tests passed");
+    return 0;
+}

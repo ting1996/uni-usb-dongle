@@ -1,8 +1,11 @@
 /build/
 /firmware/build/
-/.agents/
 /.aws/
 /.codex/
 __pycache__/
 *.pyc
+graphify-out/graph.json
+graphify-out/graph.html
+/.env
+/.env.*
 

@@ -12,6 +12,7 @@ export const COMMAND = Object.freeze({
   removeController: 0x12,
   startDiscovery: 0x13,
   pairController: 0x14,
+  getGamepadDiagnostics: 0x16,
   discoveryResult: 0x17,
   radioState: 0x18,
   pairAudio: 0x19,
@@ -19,12 +20,21 @@ export const COMMAND = Object.freeze({
   getProfileState: 0x1e,
   setProfile: 0x1f,
   getAudioMetrics: 0x20,
+  getDualsenseMetrics: 0x21,
+  getMicConfig: 0x22,
+  setMicSource: 0x23,
+  removeAudio: 0x24,
+  getBlocklist: 0x25,
+  blockDevice: 0x26,
+  unblockDevice: 0x27,
 });
 
 export const STATUS = Object.freeze({
   ok: 0,
+  invalidFrame: 1,
   invalidCommand: 2,
   busy: 3,
+  updateFailed: 5,
   unsupported: 8,
   storageError: 9,
   notFound: 10,
@@ -43,6 +53,21 @@ export const AUDIO_CODEC = Object.freeze({
   sbc: 1,
   aac: 2,
   ldac: 3,
+});
+
+export const MIC_SOURCE = Object.freeze({
+  auto: 0,
+  headphone: 1,
+  controller0: 2,
+  controller1: 3,
+  off: 4,
+});
+
+export const MIC_CODEC = Object.freeze({
+  none: 0,
+  cvsd: 1,
+  msbc: 2,
+  opus: 3,
 });
 
 export const CAPABILITY = Object.freeze({
@@ -120,10 +145,42 @@ export function profileLabel(profileId) {
   })[profileId] || `Profile ${profileId}`;
 }
 
+export function profileVidPid(profileId) {
+  return ({
+    [OUTPUT_PROFILE.generic]: "FFFF:FFFF",
+    [OUTPUT_PROFILE.xinput]: "045E:028E",
+    [OUTPUT_PROFILE.ps4]: "054C:09CC",
+    [OUTPUT_PROFILE.switch]: "057E:2009",
+    [OUTPUT_PROFILE.dualsense]: "054C:0CE6",
+  })[profileId] || "FFFF:FFFF";
+}
+
+export function micSourceLabel(sourceId) {
+  return ({
+    [MIC_SOURCE.auto]: "Auto (Headphone → Controller)",
+    [MIC_SOURCE.headphone]: "Bluetooth Headphone (HFP)",
+    [MIC_SOURCE.controller0]: "Controller 1 (DualSense)",
+    [MIC_SOURCE.controller1]: "Controller 2 (DualSense)",
+    [MIC_SOURCE.off]: "Off (Muted)",
+  })[sourceId] || `Source ${sourceId}`;
+}
+
+export function micCodecLabel(codecId) {
+  return ({
+    [MIC_CODEC.none]: "Idle / None",
+    [MIC_CODEC.cvsd]: "CVSD (8 kHz → 16 kHz)",
+    [MIC_CODEC.msbc]: "mSBC (16 kHz wideband)",
+    [MIC_CODEC.opus]: "Opus (DualSense 16 kHz)",
+  })[codecId] || `Codec ${codecId}`;
+}
+
 export function parseProfileState(bytes) {
-  if (bytes.length !== 12 || bytes[0] !== STATUS.ok) {
+  if (!(bytes instanceof Uint8Array) || bytes.length < 10 || bytes.length > 12 ||
+      bytes[0] !== STATUS.ok) {
     throw new TypeError("Invalid profile state");
   }
+  const savedProfile = bytes.length >= 11 ? bytes[10] : 0;
+  const flags = bytes.length >= 12 ? bytes[11] : 0;
   return {
     version: bytes[1],
     active: bytes[2],
@@ -136,21 +193,148 @@ export function parseProfileState(bytes) {
     codecMask: bytes[7],
     transition: bytes[8],
     failure: bytes[9],
+    savedProfile,
+    savedProfileLabel: profileLabel(savedProfile),
+    persisted: Boolean(flags & 0x01),
+    twoControllerMode: Boolean(flags & 0x02),
   };
 }
 
 export function parseAudioMetrics(bytes) {
-  if (bytes.length !== 12 || bytes[0] !== STATUS.ok) {
+  if (!(bytes instanceof Uint8Array) || bytes.length !== 12 || bytes[0] !== STATUS.ok) {
     throw new TypeError("Invalid audio metrics");
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   return {
-    avrcpConnected: !!bytes[1],
+    avrcpConnected: Boolean(bytes[1] & 0x01),
+    hfpSlcReady: Boolean(bytes[1] & 0x02),
+    hfpScoOpen: Boolean(bytes[1] & 0x04),
+    hfpMsbcActive: Boolean(bytes[1] & 0x08),
     avrcpVolume: bytes[2],
     peakLeft: view.getUint16(3, true),
     peakRight: view.getUint16(5, true),
     nonzeroPackets: view.getUint32(7, true),
+    linkRoles: bytes[11],
   };
+}
+
+export function parseDualsenseMetrics(bytes) {
+  if (!(bytes instanceof Uint8Array) || (bytes.length !== 30 && bytes.length < 38) ||
+      bytes[0] !== STATUS.ok) {
+    throw new TypeError("Invalid DualSense metrics");
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const connFlags = bytes[2];
+  const featMask = bytes[3];
+  const base = {
+    slot: bytes[1],
+    connFlags,
+    aclConnected: Boolean(connFlags & 0x01),
+    authenticated: Boolean(connFlags & 0x02),
+    controlOpen: Boolean(connFlags & 0x04),
+    interruptOpen: Boolean(connFlags & 0x08),
+    opening: Boolean(connFlags & 0x10),
+    saved: Boolean(connFlags & 0x20),
+    feat81Busy: Boolean(connFlags & 0x40),
+    featMask,
+    hasCal05: Boolean(featMask & 0x01),
+    hasMac09: Boolean(featMask & 0x02),
+    hasFw20: Boolean(featMask & 0x04),
+    has08: Boolean(featMask & 0x08),
+    has81: Boolean(featMask & 0x10),
+    ledUnlocked: Boolean(featMask & 0x20),
+    btIn31: view.getUint32(4, true),
+    btIn01: view.getUint32(8, true),
+    usbOut02: view.getUint32(12, true),
+    btOut31Ok: view.getUint32(16, true),
+    btOut31Err: view.getUint32(20, true),
+    btFeatSetOk: view.getUint16(24, true),
+    btFeatGetOk: view.getUint16(26, true),
+    lastFeatId: bytes[28],
+    lastHandshake: bytes[29],
+    lastValidFlag0: null,
+    lastValidFlag1: null,
+    lastMotorRight: null,
+    lastMotorLeft: null,
+    lastRightTriggerMode: null,
+    lastLeftTriggerMode: null,
+    lastOutPathFlags: null,
+    fwVerLo: null,
+  };
+  if (bytes.length >= 38) {
+    base.lastValidFlag0 = bytes[30];
+    base.lastValidFlag1 = bytes[31];
+    base.lastMotorRight = bytes[32];
+    base.lastMotorLeft = bytes[33];
+    base.lastRightTriggerMode = bytes[34];
+    base.lastLeftTriggerMode = bytes[35];
+    base.lastOutPathFlags = bytes[36];
+    base.fwVerLo = bytes[37];
+  }
+  return base;
+}
+
+export function parseGamepadDiagnostics(bytes) {
+  if (!(bytes instanceof Uint8Array) || bytes.length !== 27 || bytes[0] !== STATUS.ok) {
+    throw new TypeError("Invalid gamepad diagnostics");
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const flags = bytes[1];
+  return {
+    configured: Boolean(flags & 0x01),
+    busy: Boolean(flags & 0x02),
+    pending: Boolean(flags & 0x04),
+    testActive: Boolean(flags & 0x08),
+    report: Array.from(bytes.slice(2, 11)),
+    submitted: view.getUint32(11, true),
+    completed: view.getUint32(15, true),
+    tickCount: view.getUint32(19, true),
+    testStarted: view.getUint32(23, true),
+  };
+}
+
+export function parseMicState(bytes) {
+  if (!(bytes instanceof Uint8Array) || bytes.length !== 16 || bytes[0] !== STATUS.ok) {
+    throw new TypeError("Invalid mic state");
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const flags = bytes[4];
+  return {
+    configuredSource: bytes[1],
+    configuredSourceLabel: micSourceLabel(bytes[1]),
+    activeSource: bytes[2],
+    activeSourceLabel: micSourceLabel(bytes[2]),
+    activeCodec: bytes[3],
+    activeCodecLabel: micCodecLabel(bytes[3]),
+    flags,
+    usbOpen: Boolean(flags & 0x01),
+    usbMuted: Boolean(flags & 0x02),
+    hfpSlcReady: Boolean(flags & 0x04),
+    hfpScoOpen: Boolean(flags & 0x08),
+    ds0Connected: Boolean(flags & 0x10),
+    ds1Connected: Boolean(flags & 0x20),
+    scoCallbackSeen: Boolean(flags & 0x40),
+    micPeak: view.getUint16(6, true),
+    decodedFrames: view.getUint32(8, true),
+    errorFrames: view.getUint32(12, true),
+  };
+}
+
+export function parseBlocklist(bytes) {
+  if (!(bytes instanceof Uint8Array) || bytes.length < 3 || bytes[0] !== STATUS.ok) {
+    throw new TypeError("Invalid blocklist response");
+  }
+  const count = bytes[1];
+  const addrLen = bytes[2];
+  if (addrLen !== 6 || bytes.length !== 3 + count * 6) {
+    throw new TypeError("Invalid blocklist length");
+  }
+  const addresses = [];
+  for (let i = 0; i < count; i += 1) {
+    const start = 3 + i * 6;
+    addresses.push(formatAddress(bytes.slice(start, start + 6)));
+  }
+  return addresses;
 }
 
 function crc32(bytes) {

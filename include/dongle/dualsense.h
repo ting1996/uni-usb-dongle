@@ -25,8 +25,23 @@ bool dongle_dualsense_bt_feature_to_usb(const uint8_t *bt_data, size_t bt_size,
 size_t dongle_dualsense_usb_to_bt_feature(const uint8_t *usb_report,
                                          size_t usb_size, uint8_t *bt_out,
                                          size_t bt_cap);
-/* Builds a Bluetooth 0x31 output report unlocking host lightbar control. */
+/* Builds a Bluetooth 0x31 output report unlocking host lightbar control and
+ * clearing motor/trigger power reduction. */
 void dongle_dualsense_bt_unlock_leds(uint8_t seq, uint8_t bt_out[78]);
+/* Computes Sony's seeded DualSense CRC-32 (0xA1 input, 0xA2 output, 0xA3/0x53 feature). */
+uint32_t dongle_dualsense_crc32(uint8_t seed, const uint8_t *data, size_t len);
+/* Normalizes USB 0x02 rumble valid flags for Bluetooth 0x31 transmission. */
+void dongle_dualsense_normalize_usb_output(uint8_t usb_report[48],
+                                           uint16_t fw_update_ver);
+/* Translates XInput 8-byte rumble report (0x00, 0x08, ...) into DualSense USB 0x02. */
+bool dongle_dualsense_from_xinput_output(const uint8_t *xinput, size_t size,
+                                         uint8_t ds_usb[48]);
+/* Translates PS4 USB 0x05 output report (rumble/lightbar) into DualSense USB 0x02. */
+bool dongle_dualsense_from_ps4_output(const uint8_t *ps4, size_t size,
+                                      uint8_t ds_usb[48]);
+/* Translates Nintendo Switch Pro 0x01/0x10 rumble bytes into DualSense USB 0x02. */
+bool dongle_dualsense_from_switch_rumble(const uint8_t *sw, size_t size,
+                                         uint8_t ds_usb[48]);
 /* Merges src into a pending 48-byte USB 0x02 output report by valid flags so
  * rapid sequential updates (e.g. triggers followed by rumble) do not drop fields. */
 void dongle_dualsense_merge_usb_output(uint8_t dst[48], const uint8_t src[48]);

@@ -23,6 +23,7 @@ static dongle_audio_stream_t mic_pcm;
 static uint8_t mic_storage[2048];
 static volatile bool mic_opened, mic_busy, mic_muted;
 static volatile int mic_volume_db;
+static volatile uint16_t mic_peak;
 static volatile uint32_t mic_sent_bytes, mic_errors;
 static TaskHandle_t audio_task_handle;
 static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t packet[256];
@@ -43,7 +44,11 @@ size_t dongle_usb_audio_mic_write(const uint8_t *data, size_t size)
 {
     if (!data || !size) return 0U;
     size_t written = 0U;
-    (void)dongle_audio_stream_write(&mic_pcm, data, size, &written);
+    taskENTER_CRITICAL();
+    if (configured && mic_opened) {
+        (void)dongle_audio_stream_write(&mic_pcm, data, size, &written);
+    }
+    taskEXIT_CRITICAL();
     return written;
 }
 static void put32(uint8_t *p, uint32_t v)
@@ -66,6 +71,23 @@ void dongle_usb_audio_metrics(uint16_t *out_peak_l, uint16_t *out_peak_r,
     if (out_peak_l) *out_peak_l = pl;
     if (out_peak_r) *out_peak_r = pr;
     if (out_nonzero_packets) *out_nonzero_packets = nz;
+}
+void dongle_usb_audio_mic_metrics(bool *open, bool *muted, uint16_t *peak,
+                                  uint32_t *sent_bytes, uint32_t *errors)
+{
+    taskENTER_CRITICAL();
+    const bool is_open = configured && mic_opened;
+    const bool is_muted = mic_muted;
+    const uint16_t p = mic_peak;
+    const uint32_t sb = mic_sent_bytes;
+    const uint32_t err = mic_errors;
+    mic_peak = 0U;
+    taskEXIT_CRITICAL();
+    if (open) *open = is_open;
+    if (muted) *muted = is_muted;
+    if (peak) *peak = p;
+    if (sent_bytes) *sent_bytes = sb;
+    if (errors) *errors = err;
 }
 static void audio_received(uint8_t id, uint8_t ep, uint32_t size)
 {
@@ -90,6 +112,21 @@ static void audio_received(uint8_t id, uint8_t ep, uint32_t size)
     } else ++errors;
     if (usbd_ep_start_read(bus, 3, packet, 180)) ++errors;
 }
+static uint16_t db_to_q15_gain(int db)
+{
+    /* Q15 multipliers for 0 dB down to -59 dB (round(32768 * 10^(dB/20))). */
+    static const uint16_t table[60] = {
+        32768U, 29205U, 26029U, 23198U, 20675U, 18427U, 16423U, 14637U, 13045U, 11627U,
+        10362U,  9235U,  8231U,  7336U,  6538U,  5827U,  5193U,  4629U,  4125U,  3677U,
+         3277U,  2920U,  2603U,  2320U,  2068U,  1843U,  1642U,  1464U,  1305U,  1163U,
+         1036U,   924U,   823U,   734U,   654U,   583U,   519U,   463U,   413U,   368U,
+          328U,   292U,   260U,   232U,   207U,   184U,   164U,   146U,   130U,   116U,
+          104U,    92U,    82U,    73U,    65U,    58U,    52U,    46U,    41U,    37U
+    };
+    if (db >= 0) return 32768U;
+    if (db <= -60) return 0U;
+    return table[-db];
+}
 static void fill_mic_frame(uint8_t out[32])
 {
     size_t read_bytes = 0U;
@@ -97,9 +134,23 @@ static void fill_mic_frame(uint8_t out[32])
     if (read_bytes < 32U) {
         memset(&out[read_bytes], 0, 32U - read_bytes);
     }
-    if (mic_muted || mic_volume_db <= -100) {
+    if (mic_muted || mic_volume_db <= -60) {
         memset(out, 0, 32U);
+        return;
     }
+    const uint16_t gain = db_to_q15_gain(mic_volume_db);
+    uint16_t pkt_peak = 0U;
+    for (size_t i = 0U; i + 1U < 32U; i += 2U) {
+        int16_t s = (int16_t)((uint16_t)out[i] | ((uint16_t)out[i + 1U] << 8U));
+        if (gain != 32768U) {
+            s = (int16_t)(((int32_t)s * (int32_t)gain) >> 15);
+            out[i] = (uint8_t)s;
+            out[i + 1U] = (uint8_t)((uint16_t)s >> 8U);
+        }
+        const uint16_t mag = s == INT16_MIN ? 32767U : (uint16_t)(s < 0 ? -s : s);
+        if (mag > pkt_peak) pkt_peak = mag;
+    }
+    if (pkt_peak > mic_peak) mic_peak = pkt_peak;
 }
 static void mic_sent(uint8_t id, uint8_t ep, uint32_t size)
 {
@@ -124,6 +175,7 @@ void usbd_audio_open(uint8_t id, uint8_t intf)
         opened = true;
         if (usbd_ep_start_read(bus, 3, packet, 180)) ++errors;
     } else if (intf == 2) {
+        dongle_audio_stream_reset(&mic_pcm);
         mic_opened = true;
         fill_mic_frame(mic_packet);
         mic_busy = true;
@@ -137,7 +189,11 @@ void usbd_audio_close(uint8_t id, uint8_t intf)
 {
     if (id != bus) return;
     if (intf == 1) { opened = false; }
-    else if (intf == 2) { mic_opened = false; mic_busy = false; }
+    else if (intf == 2) {
+        mic_opened = false;
+        mic_busy = false;
+        dongle_audio_stream_reset(&mic_pcm);
+    }
 }
 uint32_t usbd_audio_get_sampling_freq(uint8_t id, uint8_t ep)
 {

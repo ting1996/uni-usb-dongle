@@ -55,11 +55,12 @@ repository settings) or serve the panel locally:
    VID/PIDs (`ffff:ffff` Generic, `045e:028e` Xbox 360 XInput, `054c:09cc`
    PS4 DualShock 4, `057e:2009` Switch Pro, `054c:0ce6` PS5 DualSense), so only the management collection
    is eligible regardless of the active profile.
-5. Inspect saved controller slots, discovery/pairing controls, session-only
-   USB output profile selection (`0x1e` / `0x1f`, resets to Generic on reboot),
-   and live audio/AVRCP/PCM metrics (`0x18` / `0x20`; older firmware missing
-   `0x1e`/`0x20` gracefully disables profile switching). Disconnect allows
-   switching to legacy USB serial.
+5. Navigate the five configuration tabs:
+   - **Overview & Profile**: Inspect the active USB profile (`VID:PID`), persisted boot default, controller/audio/microphone summary cards, select an output profile (`0x1e` / `0x1f`, optionally saving as boot default in flash), and reconnect smoothly after USB re-enumeration.
+   - **Devices**: Manage paired controller slots, inspect/disconnect/remove the paired Bluetooth headphone (`0x24`), scan & pair nearby devices, and manage the persistent 6-entry **Never Connect** MAC blocklist (`0x25`–`0x27`).
+   - **Audio & Mic**: Choose the persistent Bluetooth **Microphone Source** (`0x22` / `0x23`: Auto, Headphone HFP, Controller 1, Controller 2, or Off), monitor live mic/playback level meters, and check A2DP/AVRCP metrics (`0x18` / `0x20`).
+   - **Diagnostics**: Inspect live radio link roles, USB gamepad counters (`0x16`), DualSense rumble & adaptive trigger output inspection (`0x21` 38-byte metrics), mic decoder counters, and copy a JSON diagnostic snapshot (`v1.0` firmware gracefully falls back where `v1.1.0` commands are unsupported).
+   - **Firmware & Log**: Upload `.xz.ota` packages and monitor the timestamped activity log. Disconnect allows switching to legacy USB serial.
 6. For OTA, select the SDK-generated `*.xz.ota` package and acknowledge the
    existing `mfg` overlap. Controls are locked during transfer. Successful
    completion closes the browser connection; reconnect after the device boots.
@@ -106,15 +107,15 @@ Close competing applications before a firmware update.
 
 ## Protocol and firmware boundaries
 
-- In the current audio + output-profile firmware, Interface 3 is dedicated to
-  vendor management/OTA HID with a 23-byte report descriptor (Feature Report
-  ID 2 via EP0, status interrupt IN `0x85`), following the 3-interface UAC1
-  speaker + microphone collection (`MI_00`..`MI_02`). In the default `Generic` profile,
-  Interfaces 4 and 5 each expose a 77-byte gamepad report descriptor with
-  input report ID 1. When switched to `XInput`, `PS4`, `Switch`, or `DualSense`, Interfaces
-  4 and 5 re-enumerate with that profile's controller descriptors while
-  Interface 3 remains management HID. (Host tools retain detection compatibility
-  for earlier `MI_02`/`MI_03`/`MI_04` layouts.)
+- In v1.1.0 audio + output-profile firmware, the 3-interface UAC1 speaker +
+  16 kHz microphone collection occupies `MI_00`..`MI_02`, active USB gamepad(s)
+  occupy `MI_03` (and `MI_04` in two-controller mode; dedicated `OUT` FIFO `F1`
+  `EP 0x02` is armed in 1-controller console modes), and vendor management/OTA HID
+  with its 23-byte report descriptor (Feature Report ID 2 via EP0, status interrupt
+  IN `0x85`) follows at `MI_04` (1-controller mode) or `MI_05` (2-controller mode).
+  In `DualSense` (`054c:0ce6`) mode, `bcdDevice` is `0x0100` and USB strings identify
+  `Sony Interactive Entertainment` / `DualSense Wireless Controller`. (Host tools retain
+  detection compatibility for earlier `MI_02`/`MI_03`/`MI_04` layouts.)
 - Gamepad input is ten bytes on USB: ID 1 followed by the existing nine-byte
   normalized report. The routing sink still consumes nine bytes; controller
   adapters do not insert the ID themselves.

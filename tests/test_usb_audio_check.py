@@ -76,6 +76,26 @@ class UsbAudioCheckTests(unittest.TestCase):
             self.assertEqual(dev, (1, "Microphone (Bluetooth Gamepads)"))
             patched.assert_called_once_with(True, vid=0x054C, pid=0x0CE6)
 
+    def test_analyze_pcm16_mono_and_read_audio_metrics_hfp_flags(self):
+        from unittest import mock
+
+        pcm = struct.pack("<4h", 0, -1200, 4500, 0)
+        stats = usb_audio_check.analyze_pcm16_mono(pcm)
+        self.assertEqual(stats, {"samples": 4, "peak": 4500, "nonzero_samples": 2})
+
+        payload = bytearray(12)
+        payload[1] = 0x0F
+        payload[2] = 64
+        struct.pack_into("<HHI", payload, 3, 1200, 1100, 99)
+        payload[11] = 0x05
+        with mock.patch.object(usb_audio_check, "_request", return_value=bytes(payload)):
+            metrics = usb_audio_check.read_audio_metrics(None)
+        self.assertEqual(metrics["avrcp_connected"], True)
+        self.assertEqual(metrics["hfp_slc_ready"], True)
+        self.assertEqual(metrics["hfp_sco_open"], True)
+        self.assertEqual(metrics["hfp_msbc_active"], True)
+        self.assertEqual(metrics["link_roles"], 0x05)
+
 
 if __name__ == "__main__":
     unittest.main()

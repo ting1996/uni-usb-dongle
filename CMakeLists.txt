@@ -11,11 +11,15 @@ include(CTest)
 
 add_library(dongle_core
     src/core/audio_stream.c
+    src/core/device_blocklist.c
     src/core/device_catalog.c
     src/core/dualsense.c
+    src/core/dualsense_mic.c
     src/core/gamepad_router.c
+    src/core/hfp_ag.c
     src/core/hid_transport.c
     src/core/output_profile.c
+    src/core/prefs_codec.c
     src/core/settings_codec.c
     src/core/usb_ota_protocol.c
 )
@@ -91,4 +95,31 @@ if(BUILD_TESTING)
         target_compile_options(settings_codec_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     endif()
     add_test(NAME settings_codec COMMAND settings_codec_test)
+
+    add_executable(device_blocklist_test tests/device_blocklist_test.c)
+    target_link_libraries(device_blocklist_test PRIVATE dongle_core)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(device_blocklist_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    elseif(MSVC)
+        target_compile_options(device_blocklist_test PRIVATE /W4)
+    endif()
+    add_test(NAME device_blocklist COMMAND device_blocklist_test)
+
+    add_executable(prefs_codec_test tests/prefs_codec_test.c)
+    target_link_libraries(prefs_codec_test PRIVATE dongle_core)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(prefs_codec_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    elseif(MSVC)
+        target_compile_options(prefs_codec_test PRIVATE /W4)
+    endif()
+    add_test(NAME prefs_codec COMMAND prefs_codec_test)
+
+    add_executable(hfp_ag_test tests/hfp_ag_test.c)
+    target_link_libraries(hfp_ag_test PRIVATE dongle_core)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(hfp_ag_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    elseif(MSVC)
+        target_compile_options(hfp_ag_test PRIVATE /W4)
+    endif()
+    add_test(NAME hfp_ag COMMAND hfp_ag_test)
 endif()

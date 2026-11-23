@@ -4,15 +4,19 @@ This firmware targets a PS5 DualSense and Sony BRAVIA Theatre U. The BL616
 controller library provides two Classic ACL links: one controller plus one
 headphone, or two controllers. A third simultaneous Classic device cannot fit.
 
-The default `Generic` USB output profile exposes a UAC1 stereo playback device
-(interfaces 0 and 1), dedicated vendor management/OTA HID on interface 2
-(feature report ID 2 via EP0, status interrupt IN `0x85`), and two HID gamepads
-on interfaces 3 and 4 (`IN 0x81/0x82`). Audio uses isochronous `OUT 0x03` and
-explicit feedback `IN 0x84`. Switching session-only to `XInput` (`045e:028e`),
-`PS4` (`054c:09cc`), `Switch` (`057e:2009`), or `DualSense` (`054c:0ce6`) keeps UAC1 audio (0–1) and
-management HID (2) while switching interfaces 3 and 4 to the selected console profile;
-the previous pre-radio firmware is retained in [backups/pre-radio](../backups/pre-radio/).
-UART remains the debug connection.
+The default `Generic` USB output profile exposes a UAC1 stereo playback + mono 16 kHz microphone device
+(interfaces 0, 1, and 2), HID gamepads starting at interface 3 (`MI_03`, and `MI_04` in
+two-controller mode; `IN 0x81/0x82`), and dedicated vendor management/OTA HID after the gamepad
+interface(s) (`MI_04` in one-controller mode, `MI_05` in two-controller mode; feature report ID 2
+via EP0, status interrupt IN `0x85`). Audio playback uses isochronous `OUT 0x03`, asynchronous
+feedback `IN 0x84` (shared EP number/direction per UAC1 descriptor), and USB mic capture uses
+`IN 0x84`. Switching to `XInput` (`045e:028e`), `PS4` (`054c:09cc`), `Switch` (`057e:2009`), or
+`DualSense` (`054c:0ce6`, `bcdDevice = 0x0100`, Sony USB strings) keeps UAC1 audio and management HID
+while switching the gamepad interfaces (`MI_03+`) to the selected profile; in single-controller console
+modes, Gamepad 0 uses a dedicated `OUT` FIFO `F1` (`EP 0x02`) permanently armed for rumble and
+adaptive trigger output. Output profile and mic source can be persisted across reboots; the previous
+pre-radio firmware is retained in [backups/pre-radio](../backups/pre-radio/). UART remains the debug
+connection.
 
 ## Pairing
 
@@ -39,8 +43,12 @@ Pairing keys and controller slots share the existing single
 LittleFS mount. SSP Just Works is accepted only for selected or saved peers.
 
 Playback is 44.1 kHz, 16-bit stereo PCM over USB, encoded by the SDK SBC source.
-This first implementation does not provide a microphone, LDAC, adaptive trigger
-output, or controller rumble. Listen at a comfortable volume during tests.
+Starting in v1.1.0, USB microphone capture (`16 kHz` mono S16_LE) supports both Sony BRAVIA
+Theatre U via custom HFP-AG v1.7 (mSBC wideband `16 kHz` with CVSD `8 kHz -> 16 kHz` fallback;
+A2DP suspends automatically during SCO mic capture and resumes when closed) and DualSense Bluetooth
+embedded Opus mic frames decoded via `libopus`. Controller rumble and adaptive triggers are forwarded
+over Bluetooth (`0x31`) with normalized `COMPATIBLE_VIBRATION`/`HAPTICS_SELECT` flags, `-ENOMEM` retry
+preservation, and XInput/PS4/Switch rumble translation. Listen at a comfortable volume during tests.
 
 ## Connection LEDs
 
@@ -88,9 +96,16 @@ All replies fit one 60-byte HID response fragment, including the 16-byte header.
 | 0x1a Disconnect peer | address[6] | status |
 | 0x1c Capture media packet | empty | status (arms capture of next encoded SBC RTP packet) |
 | 0x1d Read media packet | empty | status, packet bytes |
-| 0x1e Get output profile | empty | 12 bytes: status, version, active, requested, profileMask, codec, streaming, codecMask, transition, failure, reserved[2] |
-| 0x1f Set output profile | profile[1], codec[1] | 12-byte profile state; schedules session-only USB re-enumeration |
-| 0x20 Get audio metrics | empty | 12 bytes: status, avrcpConnected, avrcpVolume, peakLeft (LE16), peakRight (LE16), nonzeroPackets (LE32), reserved |
+| 0x1e Get output profile | empty | 12 bytes: status, version, active, requested, profileMask, codec, streaming, codecMask, transition, failure, savedProfile, flags (`bit0` persisted, `bit1` 2-controller mode) |
+| 0x1f Set output profile | profile[1], codec[1], optional flags[1] (`bit0` persist to flash) | 12-byte profile state; schedules USB re-enumeration |
+| 0x20 Get audio metrics | empty | 12 bytes: status, flags (`bit0` AVRCP, `bit1` HFP SLC, `bit2` HFP SCO, `bit3` mSBC), avrcpVolume, peakLeft (LE16), peakRight (LE16), nonzeroPackets (LE32), linkRoles |
+| 0x21 Get DualSense metrics | slot[1] | 38 bytes (30 in v1.0): slot, connFlags, featMask, counters, lastFeatId, lastHandshake, valid_flag0/1, motors R/L, triggers R2/L2, outPathFlags, fwVerLo |
+| 0x22 Get mic config | empty | 16 bytes: status, configuredSource, activeSource, activeCodec, flags, reserved, peak (LE16), decodedFrames (LE32), errorFrames (LE32) |
+| 0x23 Set mic source | source[1] (`0` Auto..`4` Off) | 16-byte mic config & live metrics (persisted to flash) |
+| 0x24 Remove paired audio | empty | status (clears `dongle-headphone`, unpairs, disconnects A2DP/HFP) |
+| 0x25 Get blocklist | empty | status, count (`0..6`), addrLen (`6`), MAC addresses (`6 * count`) |
+| 0x26 Block device | address[6] | updated blocklist (also removes/disconnects matching paired peer and saves to flash) |
+| 0x27 Unblock device | address[6] | updated blocklist (removes MAC from Never Connect list and saves to flash) |
 
 Counters are USB PCM bytes, PCM bytes submitted to Bluetooth, underflows,
 overflows, and audio errors. Submitted bytes do not prove that the headphone

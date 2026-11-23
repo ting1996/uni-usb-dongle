@@ -129,6 +129,47 @@ class HidCheckTests(unittest.TestCase):
         with mock.patch.object(usb_hid_check.usb_device_check, "_request", return_value=b"\x02"):
             self.assertIsNone(usb_hid_check.read_dualsense_metrics(None))
 
+        payload_v11 = bytearray(payload) + bytearray([0x03, 0x0C, 0x7F, 0x40, 0x01, 0x22, 0x05, 0x02])
+        decoded_v11 = usb_hid_check.decode_dualsense_metrics(bytes(payload_v11))
+        self.assertEqual(decoded_v11["last_valid_flag0"], 0x03)
+        self.assertEqual(decoded_v11["last_valid_flag1"], 0x0C)
+        self.assertEqual(decoded_v11["last_motor_right"], 0x7F)
+        self.assertEqual(decoded_v11["last_motor_left"], 0x40)
+        self.assertEqual(decoded_v11["last_right_trigger_mode"], 0x01)
+        self.assertEqual(decoded_v11["last_left_trigger_mode"], 0x22)
+        self.assertEqual(decoded_v11["last_out_path_flags"], 0x05)
+        self.assertEqual(decoded_v11["fw_ver_lo"], 0x02)
+
+    def test_decode_mic_state_blocklist_and_profile_v11(self):
+        import struct
+
+        prof = usb_hid_check.decode_profile_state(bytes([0, 1, 4, 4, 0x1F, 1, 0xFF, 3, 0, 0, 4, 0x03]))
+        self.assertEqual(prof["saved_profile"], 4)
+        self.assertEqual(prof["saved_profile_name"], "dualsense")
+        self.assertTrue(prof["persisted"])
+        self.assertTrue(prof["two_controller_mode"])
+
+        mic_bytes = bytearray(16)
+        mic_bytes[1] = 2
+        mic_bytes[2] = 2
+        mic_bytes[3] = 3
+        mic_bytes[4] = 0x13
+        struct.pack_into("<HII", mic_bytes, 6, 9876, 400, 1)
+        mic = usb_hid_check.decode_mic_state(bytes(mic_bytes))
+        self.assertEqual(mic["configured_source_name"], "controller0")
+        self.assertEqual(mic["active_codec_name"], "opus")
+        self.assertTrue(mic["usb_open"])
+        self.assertTrue(mic["usb_muted"])
+        self.assertTrue(mic["ds0_connected"])
+        self.assertEqual(mic["mic_peak"], 9876)
+        self.assertEqual(mic["decoded_frames"], 400)
+        self.assertEqual(mic["error_frames"], 1)
+
+        bl = usb_hid_check.decode_blocklist(bytes([0, 2, 6, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]))
+        self.assertEqual(bl, ["11:22:33:44:55:66", "AA:BB:CC:DD:EE:FF"])
+        with self.assertRaises(ValueError):
+            usb_hid_check.decode_blocklist(bytes([0, 1, 6, 0x11]))
+
 
 if __name__ == "__main__":
     unittest.main()

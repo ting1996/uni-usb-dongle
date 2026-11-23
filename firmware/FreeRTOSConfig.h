@@ -14,7 +14,7 @@ void vAssertCalled(void);
 #define configTICK_RATE_HZ                      1000U
 #define configMAX_PRIORITIES                    32U
 #define configMINIMAL_STACK_SIZE                128U
-#define configTOTAL_HEAP_SIZE                   (100U * 1024U)
+#define configTOTAL_HEAP_SIZE                   (160U * 1024U)
 #define configMAX_TASK_NAME_LEN                 16U
 #define configUSE_16_BIT_TICKS                  0
 #define configIDLE_SHOULD_YIELD                 1

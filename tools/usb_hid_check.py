@@ -43,10 +43,19 @@ CMD_GET_PROFILE_STATE = 0x1E
 CMD_SET_PROFILE = 0x1F
 CMD_GET_AUDIO_METRICS = 0x20
 CMD_GET_DUALSENSE_METRICS = 0x21
+CMD_GET_MIC_CONFIG = 0x22
+CMD_SET_MIC_SOURCE = 0x23
+CMD_REMOVE_AUDIO = 0x24
+CMD_GET_BLOCKLIST = 0x25
+CMD_BLOCK_DEVICE = 0x26
+CMD_UNBLOCK_DEVICE = 0x27
 PROFILE_NAMES = {0: "generic", 1: "xinput", 2: "ps4", 3: "switch", 4: "dualsense"}
 PROFILE_IDS = {name: idx for idx, name in PROFILE_NAMES.items()}
 CODEC_NAMES = {0: "auto", 1: "sbc", 2: "aac", 3: "ldac"}
 CODEC_IDS = {name: idx for idx, name in CODEC_NAMES.items()}
+MIC_SOURCE_NAMES = {0: "auto", 1: "headphone", 2: "controller0", 3: "controller1", 4: "off"}
+MIC_SOURCE_IDS = {name: idx for idx, name in MIC_SOURCE_NAMES.items()}
+MIC_CODEC_NAMES = {0: "none", 1: "cvsd", 2: "msbc", 3: "opus"}
 
 
 def feature_fragments(packet):
@@ -295,8 +304,10 @@ def _resolve_windows_mgmt_path(device, devices=None):
 
 
 def decode_profile_state(data):
-    if len(data) != 12 or data[0] != 0:
-        raise ValueError(f"invalid profile state response: {data.hex()}")
+    if not data or not (10 <= len(data) <= 12) or data[0] != 0:
+        raise ValueError(f"invalid profile state response: {data.hex() if data else ''}")
+    saved_profile = data[10] if len(data) >= 11 else 0
+    flags = data[11] if len(data) >= 12 else 0
     return {
         "active": data[2],
         "active_name": PROFILE_NAMES.get(data[2], f"unknown({data[2]})"),
@@ -309,6 +320,10 @@ def decode_profile_state(data):
         "codec_mask": data[7],
         "transition": data[8],
         "failure": data[9],
+        "saved_profile": saved_profile,
+        "saved_profile_name": PROFILE_NAMES.get(saved_profile, f"unknown({saved_profile})"),
+        "persisted": bool(flags & 0x01),
+        "two_controller_mode": bool(flags & 0x02),
     }
 
 
@@ -319,22 +334,23 @@ def read_profile_state(port, sequence=101, timeout=3.0):
     return decode_profile_state(data)
 
 
-def set_profile(port, profile, codec=0, sequence=102, timeout=3.0):
+def set_profile(port, profile, codec=0, persist=False, sequence=102, timeout=3.0):
+    payload = bytes((profile, codec, 1)) if persist else bytes((profile, codec))
     data = usb_device_check._request(
-        port, CMD_SET_PROFILE, sequence, bytes((profile, codec)), timeout
+        port, CMD_SET_PROFILE, sequence, payload, timeout
     )
     if not data or data[0] != 0:
-        raise ValueError(f"profile switch rejected: {data.hex()}")
+        raise ValueError(f"profile switch rejected: {data.hex() if data else ''}")
     return decode_profile_state(data)
 
 
 def decode_dualsense_metrics(data):
-    if not data or len(data) != 30 or data[0] != 0:
+    if not data or (len(data) != 30 and len(data) < 38) or data[0] != 0:
         raise ValueError(f"invalid DualSense metrics response: {data.hex() if data else ''}")
     bt_in_31, bt_in_01, usb_out_02, bt_out_31_ok, bt_out_31_err, bt_feat_set_ok, bt_feat_get_ok = (
         struct.unpack_from("<5I2H", data, 4)
     )
-    return {
+    decoded = {
         "slot": data[1],
         "conn_flags": data[2],
         "feat_mask": data[3],
@@ -347,7 +363,27 @@ def decode_dualsense_metrics(data):
         "bt_feat_get_ok": bt_feat_get_ok,
         "last_feat_id": data[28],
         "last_handshake": data[29],
+        "last_valid_flag0": None,
+        "last_valid_flag1": None,
+        "last_motor_right": None,
+        "last_motor_left": None,
+        "last_right_trigger_mode": None,
+        "last_left_trigger_mode": None,
+        "last_out_path_flags": None,
+        "fw_ver_lo": None,
     }
+    if len(data) >= 38:
+        decoded.update({
+            "last_valid_flag0": data[30],
+            "last_valid_flag1": data[31],
+            "last_motor_right": data[32],
+            "last_motor_left": data[33],
+            "last_right_trigger_mode": data[34],
+            "last_left_trigger_mode": data[35],
+            "last_out_path_flags": data[36],
+            "fw_ver_lo": data[37],
+        })
+    return decoded
 
 
 def read_dualsense_metrics(port, slot=0, sequence=103, timeout=3.0):
@@ -357,6 +393,98 @@ def read_dualsense_metrics(port, slot=0, sequence=103, timeout=3.0):
     if data and data[0] in (2, 8):
         return None
     return decode_dualsense_metrics(data)
+
+
+def parse_mac_address(value):
+    parts = value.split(":")
+    if len(parts) != 6 or any(len(p) != 2 for p in parts):
+        raise ValueError(f"invalid Bluetooth MAC address: {value!r}")
+    return bytes(int(p, 16) for p in parts)
+
+
+def decode_mic_state(data):
+    if not data or len(data) != 16 or data[0] != 0:
+        raise ValueError(f"invalid mic config response: {data.hex() if data else ''}")
+    flags = data[4]
+    mic_peak, decoded_frames, error_frames = struct.unpack_from("<HII", data, 6)
+    return {
+        "configured_source": data[1],
+        "configured_source_name": MIC_SOURCE_NAMES.get(data[1], f"unknown({data[1]})"),
+        "active_source": data[2],
+        "active_source_name": MIC_SOURCE_NAMES.get(data[2], f"unknown({data[2]})"),
+        "active_codec": data[3],
+        "active_codec_name": MIC_CODEC_NAMES.get(data[3], f"unknown({data[3]})"),
+        "flags": flags,
+        "usb_open": bool(flags & 0x01),
+        "usb_muted": bool(flags & 0x02),
+        "hfp_slc_ready": bool(flags & 0x04),
+        "hfp_sco_open": bool(flags & 0x08),
+        "ds0_connected": bool(flags & 0x10),
+        "ds1_connected": bool(flags & 0x20),
+        "sco_callback_seen": bool(flags & 0x40),
+        "mic_peak": mic_peak,
+        "decoded_frames": decoded_frames,
+        "error_frames": error_frames,
+    }
+
+
+def read_mic_state(port, sequence=106, timeout=3.0):
+    data = usb_device_check._request(port, CMD_GET_MIC_CONFIG, sequence, b"", timeout)
+    if data and data[0] in (2, 8):
+        return None
+    return decode_mic_state(data)
+
+
+def set_mic_source(port, source, sequence=107, timeout=3.0):
+    data = usb_device_check._request(
+        port, CMD_SET_MIC_SOURCE, sequence, bytes((source,)), timeout
+    )
+    if not data or data[0] != 0:
+        raise ValueError(f"mic source update rejected: {data.hex() if data else ''}")
+    return decode_mic_state(data)
+
+
+def remove_audio(port, sequence=108, timeout=3.0):
+    data = usb_device_check._request(port, CMD_REMOVE_AUDIO, sequence, b"", timeout)
+    if data and data[0] in (2, 8):
+        return None
+    if not data or data[0] != 0:
+        raise ValueError(f"remove audio rejected: {data.hex() if data else ''}")
+    return True
+
+
+def decode_blocklist(data):
+    if not data or len(data) < 3 or data[0] != 0:
+        raise ValueError(f"invalid blocklist response: {data.hex() if data else ''}")
+    count = data[1]
+    addr_len = data[2]
+    if addr_len != 6 or len(data) != 3 + count * 6:
+        raise ValueError(f"malformed blocklist payload length: {data.hex()}")
+    return [
+        ":".join(f"{b:02X}" for b in data[3 + i * 6 : 3 + (i + 1) * 6])
+        for i in range(count)
+    ]
+
+
+def read_blocklist(port, sequence=109, timeout=3.0):
+    data = usb_device_check._request(port, CMD_GET_BLOCKLIST, sequence, b"", timeout)
+    if data and data[0] in (2, 8):
+        return None
+    return decode_blocklist(data)
+
+
+def block_device(port, mac_bytes, sequence=110, timeout=3.0):
+    data = usb_device_check._request(port, CMD_BLOCK_DEVICE, sequence, mac_bytes, timeout)
+    if not data or data[0] != 0:
+        raise ValueError(f"block device rejected: {data.hex() if data else ''}")
+    return decode_blocklist(data)
+
+
+def unblock_device(port, mac_bytes, sequence=111, timeout=3.0):
+    data = usb_device_check._request(port, CMD_UNBLOCK_DEVICE, sequence, mac_bytes, timeout)
+    if not data or data[0] != 0:
+        raise ValueError(f"unblock device rejected: {data.hex() if data else ''}")
+    return decode_blocklist(data)
 
 
 def _format_mac_le(raw):
@@ -458,7 +586,14 @@ def run_dualsense_passthrough_test(port):
 
         out = bytearray(48)
         out[0] = 0x02
-        out[2] = 0x04 | 0x10
+        out[1] = 0x03  # COMPATIBLE_VIBRATION | HAPTICS_SELECT
+        out[2] = 0x04 | 0x08 | 0x10  # R2 trigger | L2 trigger | player LED
+        out[3] = 0x40  # right motor
+        out[4] = 0x20  # left motor
+        out[11] = 0x01  # R2 Continuous trigger effect
+        out[12] = 0x80
+        out[22] = 0x01  # L2 Continuous trigger effect
+        out[23] = 0x80
         out[39] = 0x02
         out[42] = 0x02
         out[43] = 0x00
@@ -471,10 +606,20 @@ def run_dualsense_passthrough_test(port):
         if not kernel32.WriteFile(handle, buf_out, 48, ctypes.byref(written), None) or written.value != 48:
             raise ctypes.WinError(ctypes.get_last_error())
 
-        out[45] = 0x10
-        out[46] = 0x40
-        out[47] = 0x80
-        buf_set = (ctypes.c_ubyte * 48).from_buffer(out)
+        time.sleep(0.06)
+        out_clear = bytearray(48)
+        out_clear[0] = 0x02
+        out_clear[1] = 0x03
+        out_clear[2] = 0x04 | 0x08 | 0x10
+        out_clear[11] = 0x05  # Off/reset trigger effect
+        out_clear[22] = 0x05
+        out_clear[39] = 0x02
+        out_clear[42] = 0x02
+        out_clear[44] = 0x01
+        out_clear[45] = 0x10
+        out_clear[46] = 0x40
+        out_clear[47] = 0x80
+        buf_set = (ctypes.c_ubyte * 48).from_buffer(out_clear)
         if not hid.HidD_SetOutputReport(handle, buf_set, 48):
             raise ctypes.WinError(ctypes.get_last_error())
     finally:
@@ -486,6 +631,13 @@ def run_dualsense_passthrough_test(port):
     print(f"DualSense passthrough metrics after : {after}")
     if after["usb_out_02"] < before["usb_out_02"] + 2:
         raise ValueError(f"usb_out_02 did not increment by >= 2: before={before} after={after}")
+    if after["last_out_path_flags"] is not None:
+        print(
+            f"DualSense v1.1 feedback state: flag0=0x{after['last_valid_flag0']:02x} "
+            f"flag1=0x{after['last_valid_flag1']:02x} motors=({after['last_motor_right']},{after['last_motor_left']}) "
+            f"triggers=(0x{after['last_right_trigger_mode']:02x},0x{after['last_left_trigger_mode']:02x}) "
+            f"path=0x{after['last_out_path_flags']:02x} fw_lo=0x{after['fw_ver_lo']:02x}"
+        )
     if after["conn_flags"] & 0x08:
         if after["bt_out_31_ok"] <= before["bt_out_31_ok"]:
             raise ValueError(f"bt_out_31_ok did not increment on connected slot 0: {after}")
@@ -631,13 +783,48 @@ def main():
     parser.add_argument(
         "--set-profile",
         choices=tuple(PROFILE_IDS),
-        help="request session-only USB output profile switch (resets on reboot)",
+        help="request USB output profile switch",
+    )
+    parser.add_argument(
+        "--persist",
+        action="store_true",
+        help="save profile passed to --set-profile as persistent boot default",
     )
     parser.add_argument(
         "--codec",
         choices=tuple(CODEC_IDS),
         default="auto",
         help="preferred Bluetooth audio codec when using --set-profile",
+    )
+    parser.add_argument(
+        "--mic-config",
+        action="store_true",
+        help="query Bluetooth microphone routing and decoder metrics (0x22)",
+    )
+    parser.add_argument(
+        "--set-mic-source",
+        choices=tuple(MIC_SOURCE_IDS),
+        help="set persistent microphone routing source (0x23)",
+    )
+    parser.add_argument(
+        "--remove-audio",
+        action="store_true",
+        help="remove paired Bluetooth headphone record (0x24)",
+    )
+    parser.add_argument(
+        "--blocklist",
+        action="store_true",
+        help="query Never Connect blocklist addresses (0x25)",
+    )
+    parser.add_argument(
+        "--block",
+        metavar="MAC",
+        help="add AA:BB:CC:DD:EE:FF to Never Connect blocklist (0x26)",
+    )
+    parser.add_argument(
+        "--unblock",
+        metavar="MAC",
+        help="remove AA:BB:CC:DD:EE:FF from Never Connect blocklist (0x27)",
     )
     parser.add_argument(
         "--dualsense-metrics",
@@ -677,21 +864,57 @@ def main():
             else:
                 print(
                     f"Output profile: active={profile['active']} ({profile['active_name']}), "
-                    f"requested={profile['requested_name']}, codec={profile['codec_name']}, "
-                    f"transition={profile['transition']}, failure={profile['failure']}, "
-                    f"profile_mask=0x{profile['profile_mask']:02x}, codec_mask=0x{profile['codec_mask']:02x}"
+                    f"requested={profile['requested_name']}, saved={profile['saved_profile_name']}, "
+                    f"persisted={profile['persisted']}, two_ctrl={profile['two_controller_mode']}, "
+                    f"codec={profile['codec_name']}, transition={profile['transition']}, "
+                    f"failure={profile['failure']}, profile_mask=0x{profile['profile_mask']:02x}, "
+                    f"codec_mask=0x{profile['codec_mask']:02x}"
                 )
             if args.set_profile:
                 next_state = set_profile(
                     port,
                     PROFILE_IDS[args.set_profile],
                     CODEC_IDS[args.codec],
+                    persist=args.persist,
                     sequence=102,
                 )
                 print(
                     f"Profile switch requested: active={next_state['active_name']}, "
-                    f"requested={next_state['requested_name']}, transition={next_state['transition']}"
+                    f"requested={next_state['requested_name']}, persisted={next_state['persisted']}, "
+                    f"transition={next_state['transition']}"
                 )
+            if args.mic_config or args.set_mic_source:
+                if args.set_mic_source:
+                    mic = set_mic_source(port, MIC_SOURCE_IDS[args.set_mic_source], sequence=107)
+                else:
+                    mic = read_mic_state(port, sequence=106)
+                if mic is None:
+                    print("Mic config: not supported by running firmware (legacy)")
+                else:
+                    print(
+                        f"Mic state: configured={mic['configured_source_name']}, active={mic['active_source_name']}, "
+                        f"codec={mic['active_codec_name']}, usb_open={mic['usb_open']}, "
+                        f"usb_muted={mic['usb_muted']}, hfp_slc={mic['hfp_slc_ready']}, "
+                        f"hfp_sco={mic['hfp_sco_open']}, sco_cb={mic['sco_callback_seen']}, "
+                        f"peak={mic['mic_peak']}, decoded={mic['decoded_frames']}, errors={mic['error_frames']}"
+                    )
+            if args.remove_audio:
+                if remove_audio(port, sequence=108) is None:
+                    print("Remove audio: not supported by running firmware (legacy)")
+                else:
+                    print("Removed paired Bluetooth headphone record")
+            if args.block:
+                bl = block_device(port, parse_mac_address(args.block), sequence=110)
+                print(f"Blocklist updated ({len(bl)}): {', '.join(bl)}")
+            if args.unblock:
+                bl = unblock_device(port, parse_mac_address(args.unblock), sequence=111)
+                print(f"Blocklist updated ({len(bl)}): {', '.join(bl)}")
+            if args.blocklist:
+                bl = read_blocklist(port, sequence=109)
+                if bl is None:
+                    print("Blocklist: not supported by running firmware (legacy)")
+                else:
+                    print(f"Blocklist ({len(bl)}): {', '.join(bl) if bl else '(empty)'}")
             if args.dualsense_metrics is not None:
                 metrics = read_dualsense_metrics(port, slot=args.dualsense_metrics, sequence=103)
                 if metrics is None:
@@ -703,7 +926,8 @@ def main():
                         f"bt_in_01={metrics['bt_in_01']}, usb_out_02={metrics['usb_out_02']}, "
                         f"bt_out_31_ok={metrics['bt_out_31_ok']}, bt_out_31_err={metrics['bt_out_31_err']}, "
                         f"bt_feat_set_ok={metrics['bt_feat_set_ok']}, bt_feat_get_ok={metrics['bt_feat_get_ok']}, "
-                        f"last_feat=0x{metrics['last_feat_id']:02x}, last_hs=0x{metrics['last_handshake']:02x}"
+                        f"last_feat=0x{metrics['last_feat_id']:02x}, last_hs=0x{metrics['last_handshake']:02x}, "
+                        f"path={metrics['last_out_path_flags']}"
                     )
             if args.dualsense_passthrough_test:
                 run_dualsense_passthrough_test(port)

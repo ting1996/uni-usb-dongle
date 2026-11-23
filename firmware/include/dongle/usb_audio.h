@@ -24,6 +24,7 @@ bool dongle_usb_audio_mic_open(void);
 size_t dongle_usb_audio_mic_write(const uint8_t *data, size_t size);
 void dongle_usb_audio_diagnostics(uint8_t out[20]);
 void dongle_usb_audio_metrics(uint16_t *out_peak_l, uint16_t *out_peak_r, uint32_t *out_nonzero_packets);
+void dongle_usb_audio_mic_metrics(bool *open, bool *muted, uint16_t *peak, uint32_t *sent_bytes, uint32_t *errors);
 int dongle_usb_audio_register(uint8_t busid);
 void dongle_usb_audio_attach(uint8_t busid);
 void dongle_usb_audio_event(uint8_t event);

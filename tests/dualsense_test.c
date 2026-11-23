@@ -1,4 +1,5 @@
 #include "dongle/dualsense.h"
+#include "dongle/dualsense_mic.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -153,14 +154,112 @@ int main(void)
     }
     CHECK(!dongle_dualsense_usb_to_bt_feature(bad_id_feat, sizeof(bad_id_feat), bt_set, sizeof(bt_set)));
 
-    /* LED unlock BT 0x31 report. */
+    /* LED + power reduction unlock BT 0x31 report. */
     uint8_t unlock_bt[78] = { 0 };
     dongle_dualsense_bt_unlock_leds(0x27U, unlock_bt);
     CHECK(unlock_bt[0] == 0x31U && unlock_bt[1] == 0x70U && unlock_bt[2] == 0x10U &&
+          unlock_bt[4] == 0x40U && unlock_bt[39] == 0x00U &&
           unlock_bt[41] == 0x02U && unlock_bt[44] == 0x02U);
     memcpy(expected_bt, unlock_bt, sizeof(unlock_bt));
     sign_report(0xa2U, expected_bt);
     CHECK(memcmp(unlock_bt + 74, expected_bt + 74, 4U) == 0);
+
+    /* Normalize BT rumble flags for old (<0x0224) and modern (>=0x0224) DualSense FW. */
+    uint8_t norm_old[48] = { 0x02U, 0x00U, 0x00U, 0x80U, 0xffU };
+    norm_old[39] = 0x04U; /* COMPATIBLE_VIBRATION2 only */
+    dongle_dualsense_normalize_usb_output(norm_old, 0x0210U);
+    CHECK(norm_old[1] == 0x03U && norm_old[39] == 0x00U);
+
+    uint8_t norm_new[48] = { 0x02U, 0x01U, 0x00U, 0x50U, 0x60U };
+    dongle_dualsense_normalize_usb_output(norm_new, 0x0402U);
+    CHECK(norm_new[1] == 0x03U && norm_new[39] == 0x00U);
+
+    uint8_t norm_v2[48] = { 0x02U, 0x00U, 0x00U, 0x50U, 0x60U };
+    norm_v2[39] = 0x04U;
+    dongle_dualsense_normalize_usb_output(norm_v2, 0x0402U);
+    CHECK(norm_v2[1] == 0x02U && norm_v2[39] == 0x04U);
+
+    /* Cross-profile rumble translators (XInput, PS4, Switch Pro). */
+    const uint8_t xi[8] = { 0x00U, 0x08U, 0x00U, 0xC0U, 0x40U, 0U, 0U, 0U };
+    uint8_t ds_conv[48] = { 0 };
+    CHECK(dongle_dualsense_from_xinput_output(xi, sizeof(xi), ds_conv));
+    CHECK(ds_conv[0] == 0x02U && ds_conv[1] == 0x02U && ds_conv[39] == 0x04U &&
+          ds_conv[3] == 0x40U && ds_conv[4] == 0xC0U);
+
+    const uint8_t ps4_out[10] = { 0x05U, 0x03U, 0U, 0U, 0x22U, 0x88U, 0x10U, 0x20U, 0x30U, 0U };
+    CHECK(dongle_dualsense_from_ps4_output(ps4_out, sizeof(ps4_out), ds_conv));
+    CHECK(ds_conv[1] == 0x02U && ds_conv[2] == 0x04U && ds_conv[39] == 0x04U &&
+          ds_conv[3] == 0x22U && ds_conv[4] == 0x88U &&
+          ds_conv[45] == 0x10U && ds_conv[46] == 0x20U && ds_conv[47] == 0x30U);
+
+    const uint8_t sw_neutral[10] = { 0x10U, 0x01U, 0x00U, 0x01U, 0x40U, 0x40U, 0x00U, 0x01U, 0x40U, 0x40U };
+    CHECK(dongle_dualsense_from_switch_rumble(sw_neutral, sizeof(sw_neutral), ds_conv));
+    CHECK(ds_conv[3] == 0U && ds_conv[4] == 0U);
+    const uint8_t sw_active[10] = { 0x10U, 0x02U, 0x00U, 0xC8U, 0x40U, 0x40U, 0x00U, 0x01U, 0x40U, 0x72U };
+    CHECK(dongle_dualsense_from_switch_rumble(sw_active, sizeof(sw_active), ds_conv));
+    CHECK(ds_conv[4] == 255U && ds_conv[3] == 255U);
+
+    /* DualSense mic preamp/control reports, 0x31 bit-1 & TLV extraction & upsampler. */
+    uint8_t preamp_bt[78] = { 0 };
+    dongle_dualsense_bt_mic_preamp_report(0x03U, true, false, preamp_bt);
+    CHECK(preamp_bt[0] == 0x31U && preamp_bt[1] == 0x30U && preamp_bt[2] == 0x10U &&
+          preamp_bt[3] == 0xC0U && preamp_bt[4] == 0x03U && preamp_bt[9] == 0x20U &&
+          preamp_bt[12] == 0x00U);
+    memcpy(expected_bt, preamp_bt, sizeof(preamp_bt));
+    sign_report(0xa2U, expected_bt);
+    CHECK(memcmp(preamp_bt + 74, expected_bt + 74, 4U) == 0);
+    dongle_dualsense_bt_mic_preamp_report(0x04U, false, false, preamp_bt);
+    CHECK(preamp_bt[9] == 0x00U && preamp_bt[12] == 0x10U);
+
+    uint8_t mic_ctrl[DONGLE_DUALSENSE_BT_MIC_REPORT_SIZE] = { 0 };
+    dongle_dualsense_bt_mic_control_report(0x05U, true, false, mic_ctrl);
+    CHECK(mic_ctrl[0] == 0x32U && mic_ctrl[1] == 0x50U && mic_ctrl[2] == 0x91U &&
+          mic_ctrl[3] == 0x01U && mic_ctrl[4] == 0x03U);
+    {
+        const uint32_t crc = dongle_dualsense_crc32(0xA2U, mic_ctrl, 138U);
+        CHECK(mic_ctrl[138] == (uint8_t)crc &&
+              mic_ctrl[139] == (uint8_t)(crc >> 8U) &&
+              mic_ctrl[140] == (uint8_t)(crc >> 16U) &&
+              mic_ctrl[141] == (uint8_t)(crc >> 24U));
+    }
+    dongle_dualsense_bt_mic_control_report(0x06U, false, false, mic_ctrl);
+    CHECK(mic_ctrl[1] == 0x60U && mic_ctrl[2] == 0x91U &&
+          mic_ctrl[3] == 0x01U && mic_ctrl[4] == 0x02U);
+
+    uint8_t mic_in[78] = { 0 };
+    mic_in[0] = 0x31U;
+    mic_in[1] = 0x12U; /* seq=1, bit 1 set -> mic Opus packet */
+    mic_in[3] = 0x5AU;
+    mic_in[3U + DONGLE_DUALSENSE_BT_MIC_OPUS_SIZE - 1U] = 0xC3U;
+    sign_report(0xA1U, mic_in);
+    const uint8_t *opus_ptr = NULL;
+    size_t opus_len = 0U;
+    CHECK(dongle_dualsense_bt_extract_mic_opus(mic_in, sizeof(mic_in), &opus_ptr, &opus_len));
+    CHECK(opus_len == DONGLE_DUALSENSE_BT_MIC_OPUS_SIZE && opus_ptr == &mic_in[3] &&
+          opus_ptr[0] == 0x5AU && opus_ptr[70] == 0xC3U);
+    CHECK(!dongle_dualsense_input(mic_in, sizeof(mic_in), out));
+    CHECK(!dongle_dualsense_bt_to_usb_input(mic_in, sizeof(mic_in), ds_usb));
+
+    uint8_t ext_in[100] = { 0 };
+    ext_in[0] = 0x31U;
+    ext_in[74] = 0x82U;
+    ext_in[75] = 4U;
+    ext_in[76] = 0xAAU; ext_in[77] = 0xBBU; ext_in[78] = 0xCCU; ext_in[79] = 0xDDU;
+    uint32_t ext_crc = dongle_dualsense_crc32(0xA1U, ext_in, sizeof(ext_in) - 4U);
+    ext_in[96] = (uint8_t)ext_crc;
+    ext_in[97] = (uint8_t)(ext_crc >> 8U);
+    ext_in[98] = (uint8_t)(ext_crc >> 16U);
+    ext_in[99] = (uint8_t)(ext_crc >> 24U);
+    CHECK(dongle_dualsense_bt_extract_mic_opus(ext_in, sizeof(ext_in), &opus_ptr, &opus_len));
+    CHECK(opus_len == 4U && opus_ptr[0] == 0xAAU && opus_ptr[3] == 0xDDU);
+
+    const int16_t in8[3] = { 100, 200, 300 };
+    int16_t out16[6] = { 0 };
+    int16_t prev = 0;
+    CHECK(dongle_pcm_upsample_8k_to_16k(in8, 3U, out16, 6U, &prev) == 6U);
+    CHECK(out16[0] == 50 && out16[1] == 100 && out16[2] == 150 &&
+          out16[3] == 200 && out16[4] == 250 && out16[5] == 300);
+    CHECK(prev == 300);
 
     /* Coalescing merge preserves pending adaptive triggers when a rumble update follows. */
     uint8_t pending_out[48] = { 0x02U, 0x0CU, 0x00U };

@@ -1,5 +1,8 @@
 #include "dongle/bluetooth.h"
 #include "dongle/dualsense.h"
+#include "dongle/dualsense_mic.h"
+#include "dongle/hfp_ag.h"
+#include "dongle/mic_pipeline.h"
 #include "dongle/output_profile.h"
 #include "dongle/usb_gamepad.h"
 #include "dongle/usb_audio.h"
@@ -10,6 +13,7 @@
 #include "queue.h"
 #include "portmacro.h"
 #include "bluetooth.h"
+#include "bt_uuid.h"
 #include "conn.h"
 #include "conn_internal.h"
 #include "hci_host.h"
@@ -20,6 +24,8 @@
 #include "l2cap_internal.h"
 #include <misc/byteorder.h>
 #include "a2dp.h"
+#include "sdp.h"
+#include "rfcomm.h"
 #include "sbc/enc/sbc_encoder.h"
 #ifdef CONFIG_BT_AVRCP
 #include "avrcp.h"
@@ -71,6 +77,11 @@ static uint8_t ds_out_buf[2][DONGLE_DUALSENSE_USB_OUTPUT_SIZE];
 static uint8_t ds_out_len[2];
 static bool ds_out_pending[2];
 static uint8_t ds_out_seq[2];
+static uint8_t ds_out_path[2];
+static uint32_t ds_out_gen[2];
+static TickType_t ds_out_retry_at[2];
+static bool ds_mic_enabled[2];
+static bool ds_mic_unmuted[2];
 /* Last USB output report forwarded over Bluetooth, for coalescing. Hosts can
  * resend identical rumble/LED output every USB frame; each forwarded report
  * costs controller airtime and ACL buffers shared with the A2DP link. */
@@ -91,8 +102,24 @@ typedef struct {
     uint32_t bt_in_31, bt_in_01, usb_out_02, bt_out_31_ok, bt_out_31_err;
     uint16_t bt_feat_set_ok, bt_feat_get_ok;
     uint8_t last_feat_id, last_handshake;
+    uint8_t last_valid_flag0, last_valid_flag1;
+    uint8_t last_motor_right, last_motor_left;
+    uint8_t last_right_trigger_mode, last_left_trigger_mode;
+    uint8_t last_out_path_flags;
 } ds_slot_stats_t;
 static ds_slot_stats_t ds_stats[2];
+static dongle_device_blocklist_t *blocklist_ref;
+
+static dongle_hfp_ag_t hfp_ag;
+static struct bt_rfcomm_dlc hfp_dlc;
+static struct bt_conn *hfp_acl_conn;
+static struct bt_conn *sco_active_conn;
+static bool hfp_dlc_connected, hfp_dlc_connecting, hfp_sdp_pending, hfp_sdp_done;
+static bool hfp_remote_msbc_retry_fallback;
+static bool sco_connected, sco_opening, sco_disconnect_sent, sco_msbc_active, a2dp_suspended_for_mic;
+static volatile bool hfp_msbc_negotiated_for_hci;
+static uint8_t hfp_remote_rfcomm_chan, hfp_rx_log_count, ds_mic_pkt_logs;
+static TickType_t hfp_sdp_at, sco_retry_at, hfp_bcs_wait_until, ds_mic_retry_at[2];
 
 static bool ds_lock(void)
 {
@@ -165,6 +192,14 @@ int __wrap_bt_hci_cmd_send_sync(u16_t opcode, struct net_buf *buf, struct net_bu
     if (opcode == BT_HCI_OP_ACCEPT_CONN_REQ && buf &&
         buf->len >= sizeof(struct bt_hci_cp_accept_conn_req)) {
         ((struct bt_hci_cp_accept_conn_req *)buf->data)->role = BT_HCI_ROLE_MASTER;
+    } else if (opcode == BT_HCI_OP_ACCEPT_SYNC_CONN_REQ && buf &&
+               buf->len >= sizeof(struct bt_hci_cp_accept_sync_conn_req) &&
+               hfp_msbc_negotiated_for_hci) {
+        struct bt_hci_cp_accept_sync_conn_req *cp =
+            (struct bt_hci_cp_accept_sync_conn_req *)buf->data;
+        cp->max_latency = sys_cpu_to_le16(0x000dU);
+        cp->content_format = sys_cpu_to_le16(0x0063U);
+        cp->retrans_effort = 0x02U;
     }
     return __real_bt_hci_cmd_send_sync(opcode, buf, rsp);
 }
@@ -194,6 +229,268 @@ static peer_t *peer_address(const bt_addr_t *address)
 { for (unsigned i = 0; i < PEERS; ++i) if (!memcmp(peers[i].address.val, address->val, 6)) return &peers[i]; return NULL; }
 static peer_t *channel_peer(struct bt_l2cap_chan *chan)
 { return find_peer(chan->conn); }
+static bool is_host_addr_blocked(const uint8_t addr[6])
+{
+    if (!blocklist_ref || !addr) {
+        return false;
+    }
+    bool blocked = false;
+    if (catalog_lock != NULL &&
+        xSemaphoreTake(catalog_lock, pdMS_TO_TICKS(200U)) == pdTRUE) {
+        blocked = dongle_blocklist_contains(blocklist_ref, addr);
+        xSemaphoreGive(catalog_lock);
+    } else {
+        blocked = dongle_blocklist_contains(blocklist_ref, addr);
+    }
+    return blocked;
+}
+
+static struct bt_uuid_16 hfp_hf_sdp_uuid = BT_UUID_INIT_16(BT_SDP_HANDSFREE_SVCLASS);
+
+static struct bt_sdp_attribute hfp_ag_attrs[] = {
+    BT_SDP_NEW_SERVICE,
+    BT_SDP_LIST(
+        BT_SDP_ATTR_SVCLASS_ID_LIST,
+        BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 6),
+        BT_SDP_DATA_ELEM_LIST(
+            { BT_SDP_TYPE_SIZE(BT_SDP_UUID16), BT_SDP_ARRAY_16(BT_SDP_HANDSFREE_AGW_SVCLASS) },
+            { BT_SDP_TYPE_SIZE(BT_SDP_UUID16), BT_SDP_ARRAY_16(BT_SDP_GENERIC_AUDIO_SVCLASS) }
+        )
+    ),
+    BT_SDP_LIST(
+        BT_SDP_ATTR_PROTO_DESC_LIST,
+        BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 12),
+        BT_SDP_DATA_ELEM_LIST(
+            {
+                BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 3),
+                BT_SDP_DATA_ELEM_LIST(
+                    { BT_SDP_TYPE_SIZE(BT_SDP_UUID16), BT_SDP_ARRAY_16(BT_SDP_PROTO_L2CAP) }
+                )
+            },
+            {
+                BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 5),
+                BT_SDP_DATA_ELEM_LIST(
+                    { BT_SDP_TYPE_SIZE(BT_SDP_UUID16), BT_SDP_ARRAY_16(BT_SDP_PROTO_RFCOMM) },
+                    { BT_SDP_TYPE_SIZE(BT_SDP_UINT8), BT_SDP_ARRAY_8(BT_RFCOMM_CHAN_HFP_AG) }
+                )
+            }
+        )
+    ),
+    BT_SDP_LIST(
+        BT_SDP_ATTR_PROFILE_DESC_LIST,
+        BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 8),
+        BT_SDP_DATA_ELEM_LIST(
+            {
+                BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 6),
+                BT_SDP_DATA_ELEM_LIST(
+                    { BT_SDP_TYPE_SIZE(BT_SDP_UUID16), BT_SDP_ARRAY_16(BT_SDP_HANDSFREE_SVCLASS) },
+                    { BT_SDP_TYPE_SIZE(BT_SDP_UINT16), BT_SDP_ARRAY_16(0x0107) }
+                )
+            }
+        )
+    ),
+    BT_SDP_SERVICE_NAME("Handsfree Gateway"),
+    {
+        BT_SDP_ATTR_NETWORK,
+        { BT_SDP_TYPE_SIZE(BT_SDP_UINT8), BT_SDP_ARRAY_8(0x01) }
+    },
+    BT_SDP_SUPPORTED_FEATURES(0x0020),
+};
+
+static struct bt_sdp_record hfp_ag_record = BT_SDP_RECORD(hfp_ag_attrs);
+
+static void release_sco_active_conn(void)
+{
+    if (sco_active_conn != NULL) {
+        if (sco_active_conn->sco.acl != NULL &&
+            sco_active_conn->state == BT_CONN_DISCONNECTED) {
+            bt_conn_unref(sco_active_conn->sco.acl);
+            sco_active_conn->sco.acl = NULL;
+        }
+        bt_conn_unref(sco_active_conn);
+        sco_active_conn = NULL;
+    }
+}
+
+static void hfp_ag_sync_mic_state(void)
+{
+    const bool use_msbc = sco_connected ? sco_msbc_active
+                                        : (hfp_ag.selected_codec == 2U);
+    hfp_msbc_negotiated_for_hci = hfp_ag.selected_codec == 2U;
+    dongle_mic_pipeline_set_hfp_state(hfp_ag.slc_ready, sco_connected, use_msbc);
+}
+
+static void hfp_ag_reset_state(void)
+{
+    hfp_dlc_connected = false;
+    hfp_dlc_connecting = false;
+    hfp_sdp_pending = false;
+    hfp_sdp_done = false;
+    hfp_remote_rfcomm_chan = 0U;
+    hfp_remote_msbc_retry_fallback = false;
+    hfp_acl_conn = NULL;
+    hfp_bcs_wait_until = 0;
+    hfp_rx_log_count = 0U;
+    dongle_hfp_ag_init(&hfp_ag);
+    hfp_ag_sync_mic_state();
+}
+
+static void hfp_rfcomm_tx(void *context, const uint8_t *data, size_t size)
+{
+    (void)context;
+    if (!hfp_dlc_connected || data == NULL || size == 0U) {
+        return;
+    }
+    const size_t mtu = hfp_dlc.mtu > 0U ? (size_t)hfp_dlc.mtu : 64U;
+    size_t off = 0U;
+    while (off < size) {
+        struct net_buf *buf = bt_rfcomm_create_pdu(&hid_tx_pool);
+        if (!buf) {
+            break;
+        }
+        const size_t tail = net_buf_tailroom(buf);
+        const size_t limit = mtu < tail ? mtu : tail;
+        if (limit == 0U) {
+            net_buf_unref(buf);
+            break;
+        }
+        size_t chunk = size - off;
+        if (chunk > limit) {
+            chunk = limit;
+            for (size_t k = off + chunk; k > off; --k) {
+                if (data[k - 1U] == '\n') {
+                    chunk = k - off;
+                    break;
+                }
+            }
+        }
+        net_buf_add_mem(buf, &data[off], chunk);
+        if (bt_rfcomm_dlc_send(&hfp_dlc, buf) < 0) {
+            net_buf_unref(buf);
+            break;
+        }
+        off += chunk;
+    }
+}
+
+static void hfp_dlc_connected_cb(struct bt_rfcomm_dlc *dlc)
+{
+    (void)dlc;
+    hfp_dlc_connected = true;
+    hfp_dlc_connecting = false;
+    hfp_rx_log_count = 0U;
+    dongle_hfp_ag_init(&hfp_ag);
+    hfp_ag_sync_mic_state();
+    printf("[RADIO] HFP RFCOMM connected\r\n");
+}
+
+static void hfp_dlc_disconnected_cb(struct bt_rfcomm_dlc *dlc, struct bt_conn *conn)
+{
+    (void)dlc;
+    (void)conn;
+    hfp_dlc_connected = false;
+    hfp_dlc_connecting = false;
+    hfp_bcs_wait_until = 0;
+    hfp_rx_log_count = 0U;
+    dongle_hfp_ag_init(&hfp_ag);
+    hfp_ag_sync_mic_state();
+    printf("[RADIO] HFP RFCOMM disconnected\r\n");
+}
+
+static void hfp_dlc_recv_cb(struct bt_rfcomm_dlc *dlc, struct net_buf *buf)
+{
+    (void)dlc;
+    if (!buf || buf->len == 0U) {
+        return;
+    }
+    if (hfp_rx_log_count < 24U) {
+        ++hfp_rx_log_count;
+        char preview[80];
+        const size_t n = buf->len < (sizeof(preview) - 1U) ? buf->len : (sizeof(preview) - 1U);
+        for (size_t i = 0U; i < n; ++i) {
+            const uint8_t ch = buf->data[i];
+            preview[i] = (ch >= 0x20U && ch <= 0x7eU) ? (char)ch : '.';
+        }
+        preview[n] = '\0';
+        printf("[RADIO] HFP RX: %s\r\n", preview);
+    }
+    const dongle_hfp_ag_action_t act = dongle_hfp_ag_feed(
+        &hfp_ag, buf->data, buf->len, hfp_rfcomm_tx, NULL);
+    if (act == DONGLE_HFP_AG_ACTION_SLC_READY) {
+        hfp_rfcomm_tx(NULL, (const uint8_t *)"\r\n+VGM: 15\r\n", 12U);
+        printf("[RADIO] HFP SLC ready hf_codecs=0x%02x selected=%u\r\n",
+               hfp_ag.hf_codec_mask, hfp_ag.selected_codec);
+    } else if (act == DONGLE_HFP_AG_ACTION_OPEN_SCO_MSBC ||
+               act == DONGLE_HFP_AG_ACTION_OPEN_SCO_CVSD) {
+        hfp_bcs_wait_until = 0;
+        if (act == DONGLE_HFP_AG_ACTION_OPEN_SCO_CVSD &&
+            (hfp_ag.hf_codec_mask & 0x02U) != 0U) {
+            hfp_remote_msbc_retry_fallback = true;
+        }
+        printf("[RADIO] HFP codec selected=%u\r\n", hfp_ag.selected_codec);
+    }
+    hfp_ag_sync_mic_state();
+}
+
+static struct bt_rfcomm_dlc_ops hfp_dlc_ops = {
+    .connected = hfp_dlc_connected_cb,
+    .disconnected = hfp_dlc_disconnected_cb,
+    .recv = hfp_dlc_recv_cb,
+};
+
+static int hfp_server_accept(struct bt_conn *conn, struct bt_rfcomm_dlc **dlc)
+{
+    peer_t *p = find_peer(conn);
+    if (!p || !p->role || hfp_dlc_connected || hfp_dlc_connecting) {
+        return -EACCES;
+    }
+    memset(&hfp_dlc, 0, sizeof(hfp_dlc));
+    hfp_dlc.ops = &hfp_dlc_ops;
+    hfp_dlc.mtu = 127U;
+    hfp_dlc.required_sec_level = BT_SECURITY_L2;
+    hfp_dlc_connecting = true;
+    hfp_acl_conn = conn;
+    *dlc = &hfp_dlc;
+    return 0;
+}
+
+static struct bt_rfcomm_server hfp_server = {
+    .channel = BT_RFCOMM_CHAN_HFP_AG,
+    .accept = hfp_server_accept,
+};
+
+static uint8_t hfp_sdp_discover_cb(struct bt_conn *conn,
+                                   struct bt_sdp_client_result *result)
+{
+    if (conn == NULL || conn != hfp_acl_conn) {
+        hfp_sdp_pending = false;
+        hfp_sdp_done = true;
+        return BT_SDP_DISCOVER_UUID_STOP;
+    }
+    if (result != NULL && result->resp_buf != NULL) {
+        uint16_t chan = 0U;
+        if (bt_sdp_get_proto_param(result->resp_buf, BT_SDP_PROTO_RFCOMM, &chan) == 0 &&
+            chan > 0U && chan <= 30U) {
+            hfp_remote_rfcomm_chan = (uint8_t)chan;
+            hfp_sdp_pending = false;
+            hfp_sdp_done = true;
+            printf("[RADIO] HFP HF SDP rfcomm chan=%u\r\n", chan);
+            return BT_SDP_DISCOVER_UUID_STOP;
+        }
+        if (result->next_record_hint) {
+            return BT_SDP_DISCOVER_UUID_CONTINUE;
+        }
+    }
+    hfp_sdp_pending = false;
+    hfp_sdp_done = true;
+    return BT_SDP_DISCOVER_UUID_STOP;
+}
+
+static struct bt_sdp_discover_params hfp_sdp_params = {
+    .uuid = &hfp_hf_sdp_uuid.uuid,
+    .func = hfp_sdp_discover_cb,
+    .pool = &hid_rx_pool,
+};
 #ifdef DONGLE_BT_SIGNAL_TRACE
 /* Bounded negotiation headers only: never PCM, HCI authentication or keys. */
 static void trace_signal(const char *direction, struct bt_conn *conn, uint16_t cid, struct net_buf *buf)
@@ -344,7 +641,20 @@ static int receive_input(struct bt_l2cap_chan *chan, struct net_buf *buf)
         printf("[RADIO] controller first input len=%u report=%02x\r\n", buf->len, buf->data[1]);
     }
     if (p && p->authenticated && p->saved && buf->len > 1 && buf->data[0] == 0xa1) {
-        if (dongle_dualsense_input(buf->data + 1, buf->len - 1, report)) {
+        const uint8_t *opus_ptr = NULL;
+        size_t opus_len = 0U;
+        if (p->slot < 2U && dongle_dualsense_bt_extract_mic_opus(
+                buf->data + 1U, buf->len - 1U, &opus_ptr, &opus_len)) {
+            if (ds_mic_pkt_logs < 4U) {
+                ++ds_mic_pkt_logs;
+                printf("[RADIO] DS mic opus slot=%u len=%u hdr=%02x%02x%02x\r\n",
+                       (unsigned)p->slot, (unsigned)opus_len,
+                       opus_len > 0U ? opus_ptr[0] : 0U,
+                       opus_len > 1U ? opus_ptr[1] : 0U,
+                       opus_len > 2U ? opus_ptr[2] : 0U);
+            }
+            dongle_mic_pipeline_feed_dualsense_opus(p->slot, opus_ptr, opus_len);
+        } else if (dongle_dualsense_input(buf->data + 1, buf->len - 1, report)) {
             if (p->slot < 2U) {
                 const bool locked = ds_lock();
                 if (buf->data[1] == 0x31U && buf->len - 1U == 78U) {
@@ -374,13 +684,24 @@ static int receive_input(struct bt_l2cap_chan *chan, struct net_buf *buf)
 static void control_connected(struct bt_l2cap_chan *chan)
 { peer_t *p = channel_peer(chan); if (p) { p->control_open = true; p->profile_pending = true; printf("[RADIO] controller control connected\r\n"); } }
 static void input_connected(struct bt_l2cap_chan *chan)
-{ peer_t *p = channel_peer(chan); if (p) { p->interrupt_open = true; p->profile_pending = true; printf("[RADIO] controller input connected\r\n"); } }
+{
+    peer_t *p = channel_peer(chan);
+    if (p) {
+        p->interrupt_open = true;
+        p->profile_pending = true;
+        dongle_mic_pipeline_set_ds_connected(dongle_bluetooth_connected());
+        printf("[RADIO] controller input connected\r\n");
+    }
+}
 static void channel_disconnected(struct bt_l2cap_chan *chan)
 {
     peer_t *p = channel_peer(chan);
     if (!p) return;
     if (chan == &p->control.chan) p->control_open = false;
-    else p->interrupt_open = false;
+    else {
+        p->interrupt_open = false;
+        dongle_mic_pipeline_set_ds_connected(dongle_bluetooth_connected());
+    }
     const uint8_t neutral[9] = {128,128,128,128,0,0,0,0,8};
     if (p->slot < 2) {
         dongle_usb_gamepad_sink(NULL, p->slot, neutral, 9);
@@ -419,14 +740,24 @@ static struct bt_l2cap_server input_server = {.psm = 0x13, .accept = accept_inpu
 
 static void connected(struct bt_conn *conn, uint8_t err)
 {
+    if (conn->type == BT_CONN_TYPE_SCO) {
+        return;
+    }
     if (conn->type != BT_CONN_TYPE_BR) return;
     struct bt_conn_info info;
     if (bt_conn_get_info(conn, &info)) return;
+    uint8_t host_addr[6];
+    address_out(host_addr, info.br.dst);
     peer_t *p = peer_address(info.br.dst);
     restore_page_scan = true;
     bool outgoing = p && p->connecting;
     if (p) { p->connecting = false; p->retry_at = xTaskGetTickCount() + pdMS_TO_TICKS(10000); }
     if (err) { last_error = err; if (p) { if (p->role) audio_failure(1, err); if (p->conn) bt_conn_unref(p->conn); p->conn = NULL; } return; }
+    if (is_host_addr_blocked(host_addr)) {
+        if (p) { p->saved = false; p->reconnect = false; }
+        bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+        return;
+    }
     if (!p || (!p->saved && !p->reconnect)) { bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN); return; }
     if (!p->conn) p->conn = bt_conn_ref(conn);
     p->rtp_packets = p->rtp_samples = 0;
@@ -442,6 +773,9 @@ static void connected(struct bt_conn *conn, uint8_t err)
 }
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
+    if (conn->type == BT_CONN_TYPE_SCO) {
+        return;
+    }
     peer_t *p = find_peer(conn);
     if (!p) return;
     const uint8_t neutral[9] = {128,128,128,128,0,0,0,0,8};
@@ -450,6 +784,10 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
         dongle_usb_gamepad_dualsense_clear(p->slot);
         const bool locked = ds_lock();
         ds_out_pending[p->slot] = false;
+        ds_out_retry_at[p->slot] = 0;
+        ds_mic_enabled[p->slot] = false;
+        ds_mic_unmuted[p->slot] = false;
+        ds_mic_retry_at[p->slot] = 0;
         ds_feat_tx_pending[p->slot] = false;
         ds_feat_get_req[p->slot] = 0U;
         ds_feat_81_busy[p->slot] = false;
@@ -461,6 +799,13 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     p->ds_probe_stage = p->ds_probe_retries = p->ds_pending_get_id = 0U;
     p->ds_80_repoll_left = p->ds_feat_logged = 0U;
     if (p->role) {
+        release_sco_active_conn();
+        sco_connected = false;
+        sco_opening = false;
+        sco_disconnect_sent = false;
+        sco_msbc_active = false;
+        a2dp_suspended_for_mic = false;
+        hfp_ag_reset_state();
         dongle_usb_audio_streaming(false);
         audio_failure(5, reason);
         avrcp_connected = false;
@@ -473,7 +818,10 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     p->control_open = p->interrupt_open = p->profile_pending = p->opening = false;
     p->audio_connected = p->audio_start_requested = false;
     p->role_stage = 0;
-    if (!p->role && p->slot < 2) ds_out_last_len[p->slot] = 0;
+    if (!p->role && p->slot < 2) {
+        ds_out_last_len[p->slot] = 0;
+        dongle_mic_pipeline_set_ds_connected(dongle_bluetooth_connected());
+    }
     p->retry_at = xTaskGetTickCount() + pdMS_TO_TICKS(3000);
     /* The SDK still owns the L2CAP channel list during this callback. Do not
      * memset its channel objects before the deferred stack cleanup finishes. */
@@ -486,8 +834,15 @@ static void security_changed(struct bt_conn *conn, bt_security_t level, enum bt_
     if (!p) return;
     if (err || level < BT_SECURITY_L2) { last_error = err ? err : 1; if (p->role) audio_failure(2, last_error); return; }
     p->authenticated = true; p->profile_pending = true;
+    if (p->role) {
+        audio_state = 3;
+        hfp_acl_conn = conn;
+        hfp_sdp_at = xTaskGetTickCount() + pdMS_TO_TICKS(1200U);
+        hfp_sdp_done = false;
+        hfp_sdp_pending = false;
+        hfp_remote_rfcomm_chan = 0U;
+    }
     printf("[RADIO] authenticated role=%u\r\n", p->role);
-    if (p->role) audio_state = 3;
 }
 static struct bt_conn_cb connection_callbacks = {
     .connected = connected, .disconnected = disconnected, .security_changed = security_changed,
@@ -495,7 +850,18 @@ static struct bt_conn_cb connection_callbacks = {
 static void cancel(struct bt_conn *conn) { (void)conn; }
 /* SSP Just Works: only explicitly selected or previously saved addresses are accepted. */
 static void pairing_confirm(struct bt_conn *conn)
-{ if (find_peer(conn)) bt_conn_auth_pairing_confirm(conn); else bt_conn_auth_cancel(conn); }
+{
+    struct bt_conn_info info;
+    if (conn->type == BT_CONN_TYPE_BR && bt_conn_get_info(conn, &info) == 0) {
+        uint8_t host_addr[6];
+        address_out(host_addr, info.br.dst);
+        if (is_host_addr_blocked(host_addr)) {
+            bt_conn_auth_cancel(conn);
+            return;
+        }
+    }
+    if (find_peer(conn)) bt_conn_auth_pairing_confirm(conn); else bt_conn_auth_cancel(conn);
+}
 static void pairing_failed(struct bt_conn *conn, enum bt_security_err err)
 { peer_t *p = find_peer(conn); last_error = err ? err : 1; if (p && p->role) audio_failure(2, last_error); }
 static struct bt_conn_auth_cb authentication = {
@@ -771,6 +1137,22 @@ static void manage_role(peer_t *p, struct bt_conn *connection)
     if (!p->role_stage)
         printf("[RADIO] remains peripheral role=%u; audio may drop out\r\n", p->role);
 }
+static int sco_hci_disconnect(uint16_t handle, uint8_t reason)
+{
+    if (handle == 0U) {
+        return -EINVAL;
+    }
+    struct net_buf *buf = bt_hci_cmd_create(BT_HCI_OP_DISCONNECT,
+                                            sizeof(struct bt_hci_cp_disconnect));
+    if (!buf) {
+        return -ENOBUFS;
+    }
+    struct bt_hci_cp_disconnect *cp = net_buf_add(buf, sizeof(*cp));
+    cp->handle = sys_cpu_to_le16(handle);
+    cp->reason = reason;
+    return bt_hci_cmd_send_sync(BT_HCI_OP_DISCONNECT, buf, NULL);
+}
+
 static void radio_task(void *unused)
 {
     (void)unused;
@@ -807,7 +1189,28 @@ static void radio_task(void *unused)
                     bt_keys_link_key_clear_addr(&addr);
                     if (p) { p->saved = false; p->reconnect = false; }
                 }
-                if (p) p->reconnect = false;
+                if (p) {
+                    p->reconnect = false;
+                    if (p->role) {
+                        if (sco_active_conn != NULL) {
+                            if (sco_active_conn->state == BT_CONN_CONNECTED &&
+                                sco_active_conn->handle != 0U) {
+                                (void)sco_hci_disconnect(sco_active_conn->handle,
+                                                         BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+                            }
+                            release_sco_active_conn();
+                        }
+                        sco_connected = false;
+                        sco_opening = false;
+                        sco_disconnect_sent = false;
+                        sco_msbc_active = false;
+                        if (hfp_dlc_connected) {
+                            (void)bt_rfcomm_dlc_disconnect(&hfp_dlc);
+                        }
+                        a2dp_suspended_for_mic = false;
+                        hfp_ag_reset_state();
+                    }
+                }
                 if (p && p->conn) bt_conn_disconnect(p->conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
             } else start_connection(&op);
         }
@@ -819,6 +1222,8 @@ static void radio_task(void *unused)
             if (!connection) continue;
             if (p->role && p->authenticated && p->audio_connected && !p->audio_start_requested &&
                 !dongle_usb_audio_is_streaming() &&
+                !dongle_mic_pipeline_desired_hfp_sco() && !sco_connected && !sco_opening &&
+                !a2dp_suspended_for_mic &&
                 (int32_t)(xTaskGetTickCount() - p->audio_poll_at) >= 0) {
                 p->audio_poll_at = xTaskGetTickCount() + pdMS_TO_TICKS(200);
                 uint16_t mtu;
@@ -844,6 +1249,156 @@ static void radio_task(void *unused)
                     int result = bt_stream_resume(connection);
                     printf("[RADIO] A2DP media mtu=%u start=%d\r\n", mtu, result);
                     if (result < 0) audio_failure(3, result);
+                }
+            }
+            if (p->role && p->authenticated) {
+                const TickType_t now = xTaskGetTickCount();
+                if (p->audio_connected && !hfp_dlc_connected && !hfp_dlc_connecting &&
+                    !hfp_sdp_pending && !hfp_sdp_done &&
+                    (int32_t)(now - hfp_sdp_at) >= 0) {
+                    hfp_acl_conn = connection;
+                    hfp_sdp_pending = true;
+                    const int sdp_err = bt_sdp_discover(connection, &hfp_sdp_params);
+                    if (sdp_err != 0) {
+                        hfp_sdp_pending = false;
+                        hfp_sdp_done = true;
+                        printf("[RADIO] HFP SDP discover err=%d\r\n", sdp_err);
+                    }
+                }
+                if (hfp_remote_rfcomm_chan != 0U && !hfp_dlc_connected && !hfp_dlc_connecting) {
+                    const uint8_t ch = hfp_remote_rfcomm_chan;
+                    hfp_remote_rfcomm_chan = 0U;
+                    memset(&hfp_dlc, 0, sizeof(hfp_dlc));
+                    hfp_dlc.ops = &hfp_dlc_ops;
+                    hfp_dlc.mtu = 127U;
+                    hfp_dlc.required_sec_level = BT_SECURITY_L2;
+                    hfp_dlc_connecting = true;
+                    const int rf_err = bt_rfcomm_dlc_connect(connection, &hfp_dlc, ch);
+                    if (rf_err != 0) {
+                        hfp_dlc_connecting = false;
+                        printf("[RADIO] HFP RFCOMM connect ch=%u err=%d\r\n", ch, rf_err);
+                    }
+                }
+                uint8_t s_state = BT_CONN_DISCONNECTED;
+                uint16_t s_handle = 0U;
+                bool s_present = false;
+                if (sco_active_conn != NULL) {
+                    s_state = sco_active_conn->state;
+                    s_handle = sco_active_conn->handle;
+                    if (s_state == BT_CONN_CONNECTED || s_state == BT_CONN_CONNECT) {
+                        s_present = true;
+                    } else {
+                        release_sco_active_conn();
+                    }
+                }
+                if (s_present && s_state == BT_CONN_CONNECTED) {
+                    if (!sco_connected) {
+                        sco_connected = true;
+                        sco_opening = false;
+                        sco_disconnect_sent = false;
+                        sco_msbc_active = hfp_msbc_negotiated_for_hci;
+                        hfp_ag_sync_mic_state();
+                        printf("[RADIO] SCO connected handle=%u codec=%s\r\n",
+                               (unsigned)s_handle, sco_msbc_active ? "mSBC" : "CVSD");
+                    }
+                } else if (s_present && s_state == BT_CONN_CONNECT) {
+                    sco_opening = true;
+                } else {
+                    if (sco_connected) {
+                        sco_connected = false;
+                        sco_opening = false;
+                        sco_disconnect_sent = false;
+                        sco_msbc_active = false;
+                        hfp_ag_sync_mic_state();
+                        printf("[RADIO] SCO disconnected\r\n");
+                    } else if (sco_opening) {
+                        sco_opening = false;
+                        sco_disconnect_sent = false;
+                        sco_msbc_active = false;
+                        if (hfp_msbc_negotiated_for_hci && !hfp_remote_msbc_retry_fallback) {
+                            hfp_remote_msbc_retry_fallback = true;
+                            hfp_ag.hf_codec_mask &= (uint8_t)~0x02U;
+                            hfp_ag.selected_codec = 0U;
+                            hfp_bcs_wait_until = 0;
+                            sco_retry_at = now + pdMS_TO_TICKS(250U);
+                        } else {
+                            sco_retry_at = now + pdMS_TO_TICKS(2000U);
+                        }
+                        hfp_ag_sync_mic_state();
+                        printf("[RADIO] SCO connect failed msbc=%u fallback=%u\r\n",
+                               hfp_msbc_negotiated_for_hci ? 1U : 0U,
+                               hfp_remote_msbc_retry_fallback ? 1U : 0U);
+                    }
+                }
+
+                const bool want_sco = dongle_mic_pipeline_desired_hfp_sco();
+                if (want_sco && hfp_ag.slc_ready) {
+                    if (!s_present && !sco_connected && !sco_opening &&
+                        (int32_t)(now - sco_retry_at) >= 0) {
+                        if (dongle_usb_audio_is_streaming() || audio_state == 5U) {
+                            a2dp_suspended_for_mic = true;
+                            (void)bt_stream_suspend(connection);
+                            sco_retry_at = now + pdMS_TO_TICKS(150U);
+                        } else if (hfp_ag.selected_codec == 0U) {
+                            if (!hfp_ag.bcs_pending && hfp_bcs_wait_until == 0) {
+                                const dongle_hfp_ag_action_t act = dongle_hfp_ag_request_codec(
+                                    &hfp_ag, hfp_rfcomm_tx, NULL);
+                                if (act == DONGLE_HFP_AG_ACTION_NONE) {
+                                    hfp_bcs_wait_until = now + pdMS_TO_TICKS(500U);
+                                } else {
+                                    hfp_ag_sync_mic_state();
+                                }
+                            } else if (hfp_bcs_wait_until != 0 &&
+                                       (int32_t)(now - hfp_bcs_wait_until) >= 0) {
+                                hfp_ag.hf_codec_mask &= (uint8_t)~0x02U;
+                                hfp_remote_msbc_retry_fallback = true;
+                                hfp_ag.selected_codec = 1U;
+                                hfp_bcs_wait_until = 0;
+                                hfp_ag_sync_mic_state();
+                            }
+                        } else {
+                            const bool use_msbc = !hfp_remote_msbc_retry_fallback &&
+                                                  hfp_ag.selected_codec == 2U;
+                            hfp_msbc_negotiated_for_hci = use_msbc;
+                            hfp_ag_sync_mic_state();
+                            const struct esco_para *para = use_msbc
+                                ? ESCO_PARAM(8000U, 8000U, 13U, 0x0063U, 2U,
+                                             HCI_PKT_TYPE_ESCO_EV3 | HCI_PKT_TYPE_ESCO_3EV3 |
+                                             HCI_PKT_TYPE_ESCO_2EV5 | HCI_PKT_TYPE_ESCO_3EV5)
+                                : ESCO_PARAM(8000U, 8000U, 12U, 0x0060U, 2U,
+                                             HCI_PKT_TYPE_ESCO_EV3 | HCI_PKT_TYPE_ESCO_3EV3 |
+                                             HCI_PKT_TYPE_ESCO_2EV5 | HCI_PKT_TYPE_ESCO_3EV5);
+                            release_sco_active_conn();
+                            struct bt_conn *created = bt_conn_create_sco(&p->address, para);
+                            if (created != NULL) {
+                                sco_active_conn = created;
+                                sco_opening = true;
+                                sco_disconnect_sent = false;
+                                sco_retry_at = now + pdMS_TO_TICKS(3000U);
+                                printf("[RADIO] SCO opening codec=%s\r\n", use_msbc ? "mSBC" : "CVSD");
+                            } else if (use_msbc) {
+                                hfp_remote_msbc_retry_fallback = true;
+                                hfp_ag.hf_codec_mask &= (uint8_t)~0x02U;
+                                hfp_ag.selected_codec = 0U;
+                                hfp_bcs_wait_until = 0;
+                                sco_retry_at = now + pdMS_TO_TICKS(300U);
+                            } else {
+                                sco_retry_at = now + pdMS_TO_TICKS(2000U);
+                            }
+                        }
+                    }
+                } else {
+                    if (s_present && s_state == BT_CONN_CONNECTED && !sco_disconnect_sent) {
+                        sco_disconnect_sent = true;
+                        (void)sco_hci_disconnect(s_handle, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+                        printf("[RADIO] SCO disconnecting\r\n");
+                    } else if (!s_present && !sco_connected && !sco_opening &&
+                               a2dp_suspended_for_mic && !want_sco) {
+                        a2dp_suspended_for_mic = false;
+                        if (p->audio_connected && dongle_usb_audio_playback_open()) {
+                            (void)bt_stream_resume(connection);
+                        }
+                    }
                 }
             }
             manage_role(p, connection);
@@ -948,32 +1503,91 @@ static void radio_task(void *unused)
                         (void)ds_send_l2cap_report(&p->control.chan, 0x43U, &req_id, 1U);
                     }
 
+                    const int8_t desired_mic_slot = dongle_mic_pipeline_desired_ds_slot();
+                    const bool want_ds_mic = p->slot < 2U && desired_mic_slot == (int8_t)p->slot;
+                    if (p->slot < 2U && p->ds_led_unlocked &&
+                        want_ds_mic && !ds_mic_unmuted[p->slot] &&
+                        (int32_t)(now - ds_mic_retry_at[p->slot]) >= 0) {
+                        uint8_t bt_preamp[DONGLE_DUALSENSE_BT_OUTPUT_SIZE];
+                        locked = ds_lock();
+                        const uint8_t mic_seq = ds_out_seq[p->slot];
+                        ds_unlock(locked);
+                        dongle_dualsense_bt_mic_preamp_report(
+                            mic_seq, true, false, bt_preamp);
+                        const int mic_err = ds_send_l2cap_report(
+                            &p->interrupt.chan, 0xa2U, bt_preamp, sizeof(bt_preamp));
+                        printf("[RADIO] DS mic preamp slot=%u err=%d\r\n",
+                               (unsigned)p->slot, mic_err);
+                        if (mic_err >= 0) {
+                            locked = ds_lock();
+                            ++ds_out_seq[p->slot];
+                            ds_mic_unmuted[p->slot] = true;
+                            ds_mic_retry_at[p->slot] = now + pdMS_TO_TICKS(15U);
+                            ds_unlock(locked);
+                        } else {
+                            ds_mic_retry_at[p->slot] = now + pdMS_TO_TICKS(50U);
+                        }
+                    } else if (p->slot < 2U && p->ds_led_unlocked &&
+                               want_ds_mic != ds_mic_enabled[p->slot] &&
+                               (int32_t)(now - ds_mic_retry_at[p->slot]) >= 0) {
+                        uint8_t bt_mic[DONGLE_DUALSENSE_BT_MIC_REPORT_SIZE];
+                        locked = ds_lock();
+                        const uint8_t mic_seq = ds_out_seq[p->slot];
+                        ds_unlock(locked);
+                        dongle_dualsense_bt_mic_control_report(
+                            mic_seq, want_ds_mic, false, bt_mic);
+                        const int mic_err = ds_send_l2cap_report(
+                            &p->interrupt.chan, 0xa2U, bt_mic, sizeof(bt_mic));
+                        printf("[RADIO] DS mic toggle slot=%u enable=%u err=%d\r\n",
+                               (unsigned)p->slot, want_ds_mic ? 1U : 0U, mic_err);
+                        if (mic_err >= 0) {
+                            locked = ds_lock();
+                            ++ds_out_seq[p->slot];
+                            ds_mic_enabled[p->slot] = want_ds_mic;
+                            if (want_ds_mic) {
+                                ds_mic_pkt_logs = 0U;
+                            } else {
+                                ds_mic_unmuted[p->slot] = false;
+                            }
+                            ds_unlock(locked);
+                        } else {
+                            ds_mic_retry_at[p->slot] = now + pdMS_TO_TICKS(50U);
+                        }
+                    }
+
                     uint8_t usb_copy[DONGLE_DUALSENSE_USB_OUTPUT_SIZE];
                     uint8_t usb_len = 0U;
-                    uint8_t seq = 0U;
+                    uint8_t out_path = 0U;
+                    uint32_t out_gen = 0U;
                     bool has_out = false;
+                    const uint16_t fw_ver = p->ds_feat_20_valid
+                        ? (uint16_t)((uint16_t)p->ds_feat_20[44] |
+                                     ((uint16_t)p->ds_feat_20[45] << 8U))
+                        : 0x0402U;
                     const TickType_t out_gap = pdMS_TO_TICKS(dongle_usb_audio_is_streaming()
                         ? DS_OUT_MIN_INTERVAL_AUDIO_MS : DS_OUT_MIN_INTERVAL_MS);
                     locked = ds_lock();
-                    /* Leave a newer report pending until the interval elapses;
-                     * later USB writes replace it, so only the latest is sent. */
+                    /* Leave a newer report pending until both interval and any
+                     * controller retry backoff elapse; do not drop on -ENOMEM. */
                     if (ds_out_pending[p->slot] &&
+                        (int32_t)(now - ds_out_retry_at[p->slot]) >= 0 &&
                         (!ds_out_last_len[p->slot] ||
                          (TickType_t)(now - ds_out_last_at[p->slot]) >= out_gap)) {
                         usb_len = ds_out_len[p->slot];
-                        ds_out_pending[p->slot] = false;
+                        out_path = ds_out_path[p->slot];
+                        out_gen = ds_out_gen[p->slot];
+                        memcpy(usb_copy, ds_out_buf[p->slot], sizeof(usb_copy));
+                        dongle_dualsense_normalize_usb_output(usb_copy, fw_ver);
                         const bool unchanged = usb_len == ds_out_last_len[p->slot] &&
-                            !memcmp(ds_out_buf[p->slot], ds_out_last[p->slot], usb_len) &&
+                            !memcmp(usb_copy, ds_out_last[p->slot], usb_len) &&
                             (TickType_t)(now - ds_out_last_at[p->slot]) < pdMS_TO_TICKS(DS_OUT_REFRESH_MS);
-                        if (!unchanged) {
-                            memcpy(usb_copy, ds_out_buf[p->slot], sizeof(usb_copy));
-                            memcpy(ds_out_last[p->slot], usb_copy, usb_len);
-                            ds_out_last_len[p->slot] = usb_len;
-                            ds_out_last_at[p->slot] = now;
-                            seq = ds_out_seq[p->slot]++;
+                        if (unchanged) {
+                            ds_out_pending[p->slot] = false;
+                        } else {
                             has_out = true;
                         }
                     }
+                    const uint8_t seq = ds_out_seq[p->slot];
                     ds_unlock(locked);
                     if (has_out) {
                         uint8_t bt_rep[DONGLE_DUALSENSE_BT_OUTPUT_SIZE];
@@ -982,9 +1596,30 @@ static void radio_task(void *unused)
                                 &p->interrupt.chan, 0xa2U, bt_rep, sizeof(bt_rep));
                             locked = ds_lock();
                             if (tx_err >= 0) {
+                                memcpy(ds_out_last[p->slot], usb_copy, usb_len);
+                                ds_out_last_len[p->slot] = usb_len;
+                                ds_out_last_at[p->slot] = now;
+                                ++ds_out_seq[p->slot];
+                                if (ds_out_gen[p->slot] == out_gen) {
+                                    ds_out_pending[p->slot] = false;
+                                }
                                 ++ds_stats[p->slot].bt_out_31_ok;
+                                ds_stats[p->slot].last_valid_flag0 = usb_copy[1];
+                                ds_stats[p->slot].last_valid_flag1 = usb_copy[2];
+                                ds_stats[p->slot].last_motor_right = usb_copy[3];
+                                ds_stats[p->slot].last_motor_left = usb_copy[4];
+                                ds_stats[p->slot].last_right_trigger_mode = usb_copy[11];
+                                ds_stats[p->slot].last_left_trigger_mode = usb_copy[22];
+                                ds_stats[p->slot].last_out_path_flags = out_path;
                             } else {
                                 ++ds_stats[p->slot].bt_out_31_err;
+                                ds_out_retry_at[p->slot] = now + pdMS_TO_TICKS(8U);
+                            }
+                            ds_unlock(locked);
+                        } else {
+                            locked = ds_lock();
+                            if (ds_out_gen[p->slot] == out_gen) {
+                                ds_out_pending[p->slot] = false;
                             }
                             ds_unlock(locked);
                         }
@@ -1055,6 +1690,48 @@ uint8_t dongle_bluetooth_connected_devices(void)
     taskEXIT_CRITICAL();
     return mask;
 }
+void dongle_bluetooth_bind_blocklist(dongle_device_blocklist_t *blocklist)
+{
+    blocklist_ref = blocklist;
+}
+uint8_t dongle_bluetooth_remove_audio(void)
+{
+    uint8_t old_hp[6] = { 0 };
+    taskENTER_CRITICAL();
+    memcpy(old_hp, headphone, sizeof(old_hp));
+    for (unsigned i = 0U; i < PEERS; ++i) {
+        if (peers[i].role) {
+            if (!dongle_catalog_address_is_valid(old_hp)) {
+                address_out(old_hp, &peers[i].address);
+            }
+            peers[i].saved = false;
+            peers[i].reconnect = false;
+        }
+    }
+    memset(headphone, 0, sizeof(headphone));
+    memset(audio_target, 0, sizeof(audio_target));
+    audio_state = 0U;
+    audio_error_stage = 0U;
+    audio_error = 0U;
+    taskEXIT_CRITICAL();
+
+    if (ef_del_env("dongle-headphone") != EF_NO_ERR) {
+        return DONGLE_USB_OTA_STATUS_STORAGE_ERROR;
+    }
+    if (dongle_catalog_address_is_valid(old_hp) && operations != NULL) {
+        operation_t op = { .command = 0x1bU };
+        memcpy(op.address, old_hp, sizeof(op.address));
+        (void)xQueueSend(operations, &op, 0);
+    }
+    return DONGLE_USB_OTA_STATUS_OK;
+}
+void dongle_bluetooth_disconnect_address(const uint8_t address[6])
+{
+    if (address == NULL || !dongle_catalog_address_is_valid(address)) {
+        return;
+    }
+    dongle_bluetooth_removed(address);
+}
 void dongle_bluetooth_removed(const uint8_t address[6])
 {
     operation_t op = {.command = 0x1b}; memcpy(op.address, address, 6);
@@ -1067,7 +1744,10 @@ void dongle_bluetooth_audio_metrics(uint8_t out[12])
     uint32_t nonzero = 0U;
     dongle_usb_audio_metrics(&peak_l, &peak_r, &nonzero);
     out[0] = 0U;
-    out[1] = avrcp_connected ? 1U : 0U;
+    out[1] = (uint8_t)((avrcp_connected ? 0x01U : 0U) |
+                       (hfp_ag.slc_ready ? 0x02U : 0U) |
+                       (sco_connected ? 0x04U : 0U) |
+                       ((sco_connected && sco_msbc_active) ? 0x08U : 0U));
     out[2] = avrcp_volume;
     out[3] = (uint8_t)(peak_l & 0xffU);
     out[4] = (uint8_t)(peak_l >> 8U);
@@ -1154,8 +1834,8 @@ size_t dongle_bluetooth_dualsense_feature(
     ds_unlock(locked);
     return copied;
 }
-void dongle_bluetooth_send_dualsense_output(
-    uint8_t slot, const uint8_t *usb_report, size_t size)
+void dongle_bluetooth_send_dualsense_output_ex(
+    uint8_t slot, const uint8_t *usb_report, size_t size, uint8_t path_flags)
 {
     if (slot >= 2U || !usb_report || size < DONGLE_DUALSENSE_USB_OUTPUT_SIZE ||
         usb_report[0] != 0x02U) {
@@ -1173,8 +1853,15 @@ void dongle_bluetooth_send_dualsense_output(
         ds_out_len[slot] = len;
         ds_out_pending[slot] = true;
     }
+    ++ds_out_gen[slot];
+    ds_out_path[slot] |= path_flags;
     ++ds_stats[slot].usb_out_02;
     ds_unlock(locked);
+}
+void dongle_bluetooth_send_dualsense_output(
+    uint8_t slot, const uint8_t *usb_report, size_t size)
+{
+    dongle_bluetooth_send_dualsense_output_ex(slot, usb_report, size, 0x01U);
 }
 bool dongle_bluetooth_send_dualsense_feature(
     uint8_t slot, const uint8_t *usb_report, size_t size)
@@ -1208,7 +1895,8 @@ bool dongle_bluetooth_send_dualsense_feature(
     ds_unlock(locked);
     return true;
 }
-bool dongle_bluetooth_dualsense_metrics(uint8_t slot, uint8_t out[30])
+bool dongle_bluetooth_dualsense_metrics(
+    uint8_t slot, uint8_t out[DONGLE_DUALSENSE_METRICS_PAYLOAD_SIZE])
 {
     if (slot >= 2U || !out) {
         return false;
@@ -1249,6 +1937,14 @@ bool dongle_bluetooth_dualsense_metrics(uint8_t slot, uint8_t out[30])
     ds_write_le16(&out[26], ds_stats[slot].bt_feat_get_ok);
     out[28] = ds_stats[slot].last_feat_id;
     out[29] = ds_stats[slot].last_handshake;
+    out[30] = ds_stats[slot].last_valid_flag0;
+    out[31] = ds_stats[slot].last_valid_flag1;
+    out[32] = ds_stats[slot].last_motor_right;
+    out[33] = ds_stats[slot].last_motor_left;
+    out[34] = ds_stats[slot].last_right_trigger_mode;
+    out[35] = ds_stats[slot].last_left_trigger_mode;
+    out[36] = ds_stats[slot].last_out_path_flags;
+    out[37] = (p && p->ds_feat_20_valid) ? p->ds_feat_20[44] : 0U;
     ds_unlock(locked);
     return true;
 }
@@ -1299,6 +1995,10 @@ size_t dongle_bluetooth_command(uint8_t command, const uint8_t *data, size_t siz
         return 44;
     }
     if ((command == 0x13 && !size) || ((command == 0x14 || command == 0x19 || command == 0x1a) && size == 6 && dongle_catalog_address_is_valid(data))) {
+        if ((command == 0x14 || command == 0x19) && is_host_addr_blocked(data)) {
+            response[0] = DONGLE_USB_OTA_STATUS_UNSUPPORTED;
+            return 1;
+        }
         if (scan_active) { response[0] = 3; return 1; }
         operation_t op = {.command = command};
         if (size) memcpy(op.address, data, 6);
@@ -1313,12 +2013,13 @@ int dongle_bluetooth_start(dongle_device_catalog_t *devices, dongle_settings_sto
     catalog = devices; store = settings; catalog_lock = mutex;
     ds_stats[0].last_handshake = 0xffU;
     ds_stats[1].last_handshake = 0xffU;
+    dongle_hfp_ag_init(&hfp_ag);
     dongle_bluetooth_storage_bind(store);
     ready_signal = xSemaphoreCreateBinary(); operations = xQueueCreate(4, sizeof(operation_t));
     if (!ready_signal || !operations) return -ENOMEM;
     if (rfparam_init(0, NULL, 0)) return -EIO;
-    net_buf_init(&hid_tx_pool, 8, BT_L2CAP_BUF_SIZE(HID_MTU), NULL);
-    net_buf_init(&hid_rx_pool, 8, BT_L2CAP_BUF_SIZE(HID_MTU), NULL);
+    net_buf_init(&hid_tx_pool, 12, BT_L2CAP_BUF_SIZE(HID_MTU), NULL);
+    net_buf_init(&hid_rx_pool, 10, BT_L2CAP_BUF_SIZE(HID_MTU), NULL);
     btble_controller_init(configMAX_PRIORITIES - 1);
     hci_driver_init();
     bt_conn_cb_register(&connection_callbacks); bt_conn_auth_cb_register(&authentication);
@@ -1340,11 +2041,17 @@ int dongle_bluetooth_start(dongle_device_catalog_t *devices, dongle_settings_sto
 #endif
     bt_a2dp_discovery_cb_register(audio_discovered);
     bt_l2cap_br_server_register(&control_server); bt_l2cap_br_server_register(&input_server);
+    (void)bt_sdp_register_service(&hfp_ag_record);
+    (void)bt_rfcomm_server_register(&hfp_server);
     bt_br_set_connectable(true);
     GLB_Set_USB_CLK_From_WIFIPLL(1);
     ef_get_env_blob("dongle-headphone", headphone, 6, NULL);
+    if (dongle_catalog_address_is_valid(headphone) && is_host_addr_blocked(headphone)) {
+        memset(headphone, 0, sizeof(headphone));
+    }
     for (unsigned i = 0; i < 2; ++i) {
-        if (catalog->controllers[i].paired) {
+        if (catalog->controllers[i].paired &&
+            !is_host_addr_blocked(catalog->controllers[i].address)) {
             peers[i].slot = i; peers[i].saved = peers[i].reconnect = true;
             peers[i].retry_at = xTaskGetTickCount() + pdMS_TO_TICKS(1500 + i * 1000);
             for (unsigned j = 0; j < 6; ++j) peers[i].address.val[j] = catalog->controllers[i].address[5-j];

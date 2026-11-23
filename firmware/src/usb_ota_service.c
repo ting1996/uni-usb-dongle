@@ -3,11 +3,15 @@
 #include "FreeRTOS.h"
 #include "dongle/usb_ota_protocol.h"
 #include "dongle/settings_store.h"
+#include "dongle/prefs_codec.h"
+#include "dongle/device_blocklist.h"
+#include "dongle/mic_pipeline.h"
 #include "dongle/usb_gamepad.h"
 #include "dongle/usb_hid_transport.h"
 #include "dongle/bluetooth.h"
 #include "dongle/usb_audio.h"
 #include "dongle/usb_profiles.h"
+#include "easyflash.h"
 #include "ota/ota.h"
 #ifdef CONFIG_M62_STATUS_LEDS
 #include "dongle/status_led.h"
@@ -72,12 +76,62 @@ static TaskHandle_t usb_ota_task_handle;
 static SemaphoreHandle_t device_catalog_mutex;
 static dongle_device_catalog_t *device_catalog;
 static dongle_settings_store_t *device_settings_store;
+static dongle_prefs_t saved_prefs;
+static dongle_device_blocklist_t device_blocklist;
 static volatile bool usb_configured;
 static volatile bool usb_rx_armed;
 static volatile bool usb_rx_overflow;
 static volatile bool usb_rx_rearm_error;
 /* Only the protocol task changes response routing. */
 static bool response_over_hid;
+
+static bool load_prefs(void)
+{
+    (void)dongle_prefs_init_defaults(&saved_prefs);
+    uint8_t blob[DONGLE_PREFS_BLOB_SIZE] = { 0 };
+    size_t saved = 0U;
+    if (ef_get_env_blob("dongle-prefs", blob, sizeof(blob), &saved) == sizeof(blob) &&
+        saved == sizeof(blob)) {
+        dongle_prefs_t decoded;
+        if (dongle_prefs_decode(blob, sizeof(blob), &decoded) == DONGLE_PREFS_OK) {
+            saved_prefs = decoded;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool save_prefs(void)
+{
+    uint8_t blob[DONGLE_PREFS_BLOB_SIZE] = { 0 };
+    if (dongle_prefs_encode(&saved_prefs, blob, sizeof(blob)) != DONGLE_PREFS_OK) {
+        return false;
+    }
+    return ef_set_env_blob("dongle-prefs", blob, sizeof(blob)) == EF_NO_ERR;
+}
+
+static void load_blocklist(void)
+{
+    (void)dongle_blocklist_init(&device_blocklist);
+    uint8_t blob[DONGLE_BLOCKLIST_BLOB_SIZE] = { 0 };
+    size_t saved = 0U;
+    if (ef_get_env_blob("dongle-blocklist", blob, sizeof(blob), &saved) == sizeof(blob) &&
+        saved == sizeof(blob)) {
+        dongle_device_blocklist_t decoded;
+        if (dongle_blocklist_decode(blob, sizeof(blob), &decoded) == DONGLE_BLOCKLIST_OK) {
+            device_blocklist = decoded;
+        }
+    }
+}
+
+static bool save_blocklist(void)
+{
+    uint8_t blob[DONGLE_BLOCKLIST_BLOB_SIZE] = { 0 };
+    if (dongle_blocklist_encode(&device_blocklist, blob, sizeof(blob)) != DONGLE_BLOCKLIST_OK) {
+        return false;
+    }
+    return ef_set_env_blob("dongle-blocklist", blob, sizeof(blob)) == EF_NO_ERR;
+}
 
 static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX
     uint8_t usb_rx_buffer[USB_OTA_RX_BUFFER_SIZE];
@@ -116,6 +170,14 @@ static const char *usb_ota_string_descriptor_callback(uint8_t speed,
     if (index >= sizeof(usb_ota_string_descriptors) /
                      sizeof(usb_ota_string_descriptors[0])) {
         return NULL;
+    }
+    if (dongle_usb_profile() == DONGLE_PROFILE_DUALSENSE) {
+        if (index == 1U) {
+            return "Sony Interactive Entertainment";
+        }
+        if (index == 2U) {
+            return "DualSense Wireless Controller";
+        }
     }
     return usb_ota_string_descriptors[index];
 }
@@ -719,7 +781,11 @@ static void usb_ota_task(void *argument)
              frame.command == DONGLE_USB_OTA_CMD_PAIR_CONTROLLER ||
              frame.command == DONGLE_USB_OTA_CMD_PAIR_AUDIO ||
              frame.command == DONGLE_USB_OTA_CMD_DISCONNECT_PEER ||
-             frame.command == DONGLE_USB_OTA_CMD_SET_PROFILE)) {
+             frame.command == DONGLE_USB_OTA_CMD_SET_PROFILE ||
+             frame.command == DONGLE_USB_OTA_CMD_SET_MIC_SOURCE ||
+             frame.command == DONGLE_USB_OTA_CMD_REMOVE_AUDIO ||
+             frame.command == DONGLE_USB_OTA_CMD_BLOCK_DEVICE ||
+             frame.command == DONGLE_USB_OTA_CMD_UNBLOCK_DEVICE)) {
             (void)send_response(&frame, DONGLE_USB_OTA_STATUS_BUSY, session.expected_offset);
             continue;
         }
@@ -741,16 +807,25 @@ static void usb_ota_task(void *argument)
             if (session.handle != NULL) {
                 reply[0] = DONGLE_USB_OTA_STATUS_BUSY;
                 (void)send_response_payload(&frame, reply, 1U);
-            } else if (frame.payload_size != 2U) {
+            } else if (frame.payload_size != 2U && frame.payload_size != 3U) {
                 reply[0] = DONGLE_USB_OTA_STATUS_INVALID_FRAME;
                 (void)send_response_payload(&frame, reply, 1U);
             } else {
+                const bool persist = frame.payload_size == 3U &&
+                                     (frame.payload[2] & 0x01U) != 0U;
                 const uint8_t rc = dongle_usb_profile_request(
-                    frame.payload[0], frame.payload[1]);
+                    frame.payload[0], frame.payload[1], persist);
                 if (rc != DONGLE_USB_OTA_STATUS_OK) {
                     reply[0] = rc;
                     (void)send_response_payload(&frame, reply, 1U);
                 } else {
+                    if (persist && device_catalog_mutex != NULL &&
+                        xSemaphoreTake(device_catalog_mutex, portMAX_DELAY) == pdTRUE) {
+                        saved_prefs.boot_profile = frame.payload[0];
+                        saved_prefs.audio_codec = frame.payload[1];
+                        (void)save_prefs();
+                        (void)xSemaphoreGive(device_catalog_mutex);
+                    }
                     const size_t n = dongle_usb_profile_state(reply);
                     (void)send_response_payload(&frame, reply, (uint16_t)n);
                 }
@@ -775,6 +850,197 @@ static void usb_ota_task(void *argument)
             } else {
                 (void)send_response_payload(&frame, reply, sizeof(reply));
             }
+            continue;
+        } else if (frame.command == DONGLE_USB_OTA_CMD_GET_MIC_CONFIG) {
+            uint8_t reply[DONGLE_MIC_STATE_PAYLOAD_SIZE] = { 0 };
+            if (frame.payload_size != 0U) {
+                reply[0] = DONGLE_USB_OTA_STATUS_INVALID_FRAME;
+                (void)send_response_payload(&frame, reply, 1U);
+            } else {
+                const size_t n = dongle_mic_pipeline_metrics(reply);
+                (void)send_response_payload(&frame, reply, (uint16_t)n);
+            }
+            continue;
+        } else if (frame.command == DONGLE_USB_OTA_CMD_SET_MIC_SOURCE) {
+            uint8_t reply[DONGLE_MIC_STATE_PAYLOAD_SIZE] = { 0 };
+            if (session.handle != NULL) {
+                reply[0] = DONGLE_USB_OTA_STATUS_BUSY;
+                (void)send_response_payload(&frame, reply, 1U);
+            } else if (frame.payload_size != 1U ||
+                       !dongle_mic_pipeline_set_source(frame.payload[0])) {
+                reply[0] = DONGLE_USB_OTA_STATUS_INVALID_FRAME;
+                (void)send_response_payload(&frame, reply, 1U);
+            } else {
+                if (device_catalog_mutex != NULL &&
+                    xSemaphoreTake(device_catalog_mutex, portMAX_DELAY) == pdTRUE) {
+                    const uint8_t prev = saved_prefs.mic_source;
+                    saved_prefs.mic_source = frame.payload[0];
+                    if (!save_prefs()) {
+                        saved_prefs.mic_source = prev;
+                        (void)dongle_mic_pipeline_set_source(prev);
+                        reply[0] = DONGLE_USB_OTA_STATUS_STORAGE_ERROR;
+                        (void)xSemaphoreGive(device_catalog_mutex);
+                        (void)send_response_payload(&frame, reply, 1U);
+                        continue;
+                    }
+                    (void)xSemaphoreGive(device_catalog_mutex);
+                }
+                const size_t n = dongle_mic_pipeline_metrics(reply);
+                (void)send_response_payload(&frame, reply, (uint16_t)n);
+            }
+            continue;
+        } else if (frame.command == DONGLE_USB_OTA_CMD_REMOVE_AUDIO) {
+            uint8_t rc = DONGLE_USB_OTA_STATUS_OK;
+            if (session.handle != NULL) {
+                rc = DONGLE_USB_OTA_STATUS_BUSY;
+            } else if (frame.payload_size != 0U) {
+                rc = DONGLE_USB_OTA_STATUS_INVALID_FRAME;
+            } else {
+                rc = dongle_bluetooth_remove_audio();
+            }
+            (void)send_response_payload(&frame, &rc, 1U);
+            continue;
+        } else if (frame.command == DONGLE_USB_OTA_CMD_GET_BLOCKLIST) {
+            uint8_t reply[DONGLE_BLOCKLIST_MAX_PAYLOAD_SIZE] = { 0 };
+            if (frame.payload_size != 0U) {
+                reply[0] = DONGLE_USB_OTA_STATUS_INVALID_FRAME;
+                (void)send_response_payload(&frame, reply, 1U);
+            } else if (device_catalog_mutex == NULL ||
+                       xSemaphoreTake(device_catalog_mutex, portMAX_DELAY) != pdTRUE) {
+                reply[0] = DONGLE_USB_OTA_STATUS_BUSY;
+                (void)send_response_payload(&frame, reply, 1U);
+            } else {
+                const uint8_t count = device_blocklist.count <= DONGLE_BLOCKLIST_MAX_ENTRIES
+                    ? device_blocklist.count : DONGLE_BLOCKLIST_MAX_ENTRIES;
+                reply[0] = DONGLE_USB_OTA_STATUS_OK;
+                reply[1] = count;
+                reply[2] = DONGLE_BLUETOOTH_ADDRESS_SIZE;
+                for (uint8_t i = 0U; i < count; ++i) {
+                    memcpy(&reply[3U + i * 6U], device_blocklist.addresses[i], 6U);
+                }
+                (void)xSemaphoreGive(device_catalog_mutex);
+                (void)send_response_payload(&frame, reply, (uint16_t)(3U + count * 6U));
+            }
+            continue;
+        } else if (frame.command == DONGLE_USB_OTA_CMD_BLOCK_DEVICE) {
+            uint8_t reply[DONGLE_BLOCKLIST_MAX_PAYLOAD_SIZE] = { 0 };
+            if (session.handle != NULL) {
+                reply[0] = DONGLE_USB_OTA_STATUS_BUSY;
+                (void)send_response_payload(&frame, reply, 1U);
+                continue;
+            }
+            if (frame.payload_size != 6U ||
+                !dongle_catalog_address_is_valid(frame.payload)) {
+                reply[0] = DONGLE_USB_OTA_STATUS_INVALID_FRAME;
+                (void)send_response_payload(&frame, reply, 1U);
+                continue;
+            }
+            if (device_catalog_mutex == NULL ||
+                xSemaphoreTake(device_catalog_mutex, portMAX_DELAY) != pdTRUE) {
+                reply[0] = DONGLE_USB_OTA_STATUS_BUSY;
+                (void)send_response_payload(&frame, reply, 1U);
+                continue;
+            }
+            const dongle_device_blocklist_t before_bl = device_blocklist;
+            const dongle_blocklist_result_t bl_res =
+                dongle_blocklist_add(&device_blocklist, frame.payload);
+            uint8_t status_out = DONGLE_USB_OTA_STATUS_OK;
+            if (bl_res == DONGLE_BLOCKLIST_FULL) {
+                status_out = DONGLE_USB_OTA_STATUS_UPDATE_FAILED;
+            } else if (bl_res == DONGLE_BLOCKLIST_OK) {
+                if (!save_blocklist()) {
+                    device_blocklist = before_bl;
+                    status_out = DONGLE_USB_OTA_STATUS_STORAGE_ERROR;
+                }
+            }
+            if (status_out == DONGLE_USB_OTA_STATUS_OK && device_catalog != NULL) {
+                bool catalog_changed = false;
+                const dongle_device_catalog_t before_cat = *device_catalog;
+                for (uint8_t slot = 0U; slot < 2U; ++slot) {
+                    if (device_catalog->controllers[slot].paired &&
+                        memcmp(device_catalog->controllers[slot].address,
+                               frame.payload, 6U) == 0) {
+                        if (dongle_catalog_remove_controller(device_catalog, slot) ==
+                            DONGLE_CATALOG_OK) {
+                            catalog_changed = true;
+                        }
+                    }
+                }
+                if (catalog_changed &&
+                    (device_settings_store == NULL || !device_settings_store->initialized ||
+                     dongle_settings_store_save(device_settings_store,
+                                                device_catalog) != DONGLE_STORE_OK)) {
+                    *device_catalog = before_cat;
+                }
+            }
+            const uint8_t count = device_blocklist.count <= DONGLE_BLOCKLIST_MAX_ENTRIES
+                ? device_blocklist.count : DONGLE_BLOCKLIST_MAX_ENTRIES;
+            reply[0] = status_out;
+            if (status_out == DONGLE_USB_OTA_STATUS_OK) {
+                reply[1] = count;
+                reply[2] = DONGLE_BLUETOOTH_ADDRESS_SIZE;
+                for (uint8_t i = 0U; i < count; ++i) {
+                    memcpy(&reply[3U + i * 6U], device_blocklist.addresses[i], 6U);
+                }
+            }
+            (void)xSemaphoreGive(device_catalog_mutex);
+            if (status_out == DONGLE_USB_OTA_STATUS_OK) {
+                uint8_t radio_rsp[44] = { 0 };
+                (void)dongle_bluetooth_command(0x18U, NULL, 0U, radio_rsp);
+                if (memcmp(&radio_rsp[7], frame.payload, 6U) == 0) {
+                    (void)dongle_bluetooth_remove_audio();
+                }
+                dongle_bluetooth_disconnect_address(frame.payload);
+                (void)send_response_payload(&frame, reply, (uint16_t)(3U + count * 6U));
+            } else {
+                (void)send_response_payload(&frame, reply, 1U);
+            }
+            continue;
+        } else if (frame.command == DONGLE_USB_OTA_CMD_UNBLOCK_DEVICE) {
+            uint8_t reply[DONGLE_BLOCKLIST_MAX_PAYLOAD_SIZE] = { 0 };
+            if (session.handle != NULL) {
+                reply[0] = DONGLE_USB_OTA_STATUS_BUSY;
+                (void)send_response_payload(&frame, reply, 1U);
+                continue;
+            }
+            if (frame.payload_size != 6U ||
+                !dongle_catalog_address_is_valid(frame.payload)) {
+                reply[0] = DONGLE_USB_OTA_STATUS_INVALID_FRAME;
+                (void)send_response_payload(&frame, reply, 1U);
+                continue;
+            }
+            if (device_catalog_mutex == NULL ||
+                xSemaphoreTake(device_catalog_mutex, portMAX_DELAY) != pdTRUE) {
+                reply[0] = DONGLE_USB_OTA_STATUS_BUSY;
+                (void)send_response_payload(&frame, reply, 1U);
+                continue;
+            }
+            const dongle_device_blocklist_t before_bl = device_blocklist;
+            const dongle_blocklist_result_t bl_res =
+                dongle_blocklist_remove(&device_blocklist, frame.payload);
+            uint8_t status_out = DONGLE_USB_OTA_STATUS_OK;
+            if (bl_res == DONGLE_BLOCKLIST_NOT_FOUND) {
+                status_out = DONGLE_USB_OTA_STATUS_NOT_FOUND;
+            } else if (bl_res != DONGLE_BLOCKLIST_OK) {
+                status_out = DONGLE_USB_OTA_STATUS_INVALID_FRAME;
+            } else if (!save_blocklist()) {
+                device_blocklist = before_bl;
+                status_out = DONGLE_USB_OTA_STATUS_STORAGE_ERROR;
+            }
+            const uint8_t count = device_blocklist.count <= DONGLE_BLOCKLIST_MAX_ENTRIES
+                ? device_blocklist.count : DONGLE_BLOCKLIST_MAX_ENTRIES;
+            reply[0] = status_out;
+            if (status_out == DONGLE_USB_OTA_STATUS_OK) {
+                reply[1] = count;
+                reply[2] = DONGLE_BLUETOOTH_ADDRESS_SIZE;
+                for (uint8_t i = 0U; i < count; ++i) {
+                    memcpy(&reply[3U + i * 6U], device_blocklist.addresses[i], 6U);
+                }
+            }
+            (void)xSemaphoreGive(device_catalog_mutex);
+            (void)send_response_payload(
+                &frame, reply, status_out == DONGLE_USB_OTA_STATUS_OK
+                                   ? (uint16_t)(3U + count * 6U) : 1U);
             continue;
         } else if (frame.command == DONGLE_USB_OTA_CMD_SELECT_CONTROLLER ||
                    frame.command == DONGLE_USB_OTA_CMD_REMOVE_CONTROLLER ||
@@ -859,8 +1125,17 @@ BaseType_t dongle_usb_ota_service_start(
         return pdFAIL;
     }
 
+    dongle_bluetooth_storage_bind(settings_store);
+    const bool has_saved_prefs = load_prefs();
+    load_blocklist();
+    dongle_usb_profile_init(
+        has_saved_prefs ? saved_prefs.boot_profile : 0xffU,
+        saved_prefs.audio_codec);
+    dongle_bluetooth_bind_blocklist(&device_blocklist);
+
     int radio_error = dongle_bluetooth_start(catalog, settings_store, device_catalog_mutex);
     LOG_I("Bluetooth startup result: %d\r\n", radio_error);
+    dongle_mic_pipeline_init(saved_prefs.mic_source);
     if (attach_usb_stack(true) != 0) {
         vSemaphoreDelete(device_catalog_mutex);
         device_catalog_mutex = NULL;

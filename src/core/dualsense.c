@@ -15,11 +15,16 @@ static uint32_t crc_byte(uint32_t crc, uint8_t byte)
     return crc;
 }
 
-static uint32_t ds_crc32(uint8_t seed, const uint8_t *data, size_t len)
+uint32_t dongle_dualsense_crc32(uint8_t seed, const uint8_t *data, size_t len)
 {
     uint32_t crc = crc_byte(UINT32_MAX, seed);
     for (size_t i = 0; i < len; ++i) crc = crc_byte(crc, data[i]);
     return ~crc;
+}
+
+static uint32_t ds_crc32(uint8_t seed, const uint8_t *data, size_t len)
+{
+    return dongle_dualsense_crc32(seed, data, len);
 }
 
 static uint32_t read_le32(const uint8_t *p)
@@ -41,7 +46,7 @@ bool dongle_dualsense_input(const uint8_t *data, size_t size, uint8_t output[9])
     if (!data || !output || !size) return false;
     const uint8_t *p;
     uint8_t buttons0, buttons1, buttons2;
-    if (data[0] == 0x31 && size == 78) {
+    if (data[0] == 0x31 && (data[1] & 0x02U) == 0U && size == 78) {
         if (ds_crc32(0xa1U, data, 74U) != read_le32(data + 74)) return false;
         p = data + 2;
         buttons0 = p[7]; buttons1 = p[8]; buttons2 = p[9];
@@ -64,7 +69,7 @@ bool dongle_dualsense_bt_to_usb_input(const uint8_t *data, size_t size,
                                       uint8_t usb_out[64])
 {
     if (!data || !usb_out || !size) return false;
-    if (data[0] == 0x31U && size == 78U) {
+    if (data[0] == 0x31U && (data[1] & 0x02U) == 0U && size == 78U) {
         if (ds_crc32(0xa1U, data, 74U) != read_le32(data + 74)) return false;
         usb_out[0] = 0x01U;
         memcpy(usb_out + 1, data + 2, 63U);
@@ -110,6 +115,7 @@ size_t dongle_dualsense_feature_size(uint8_t report_id)
         case 0x08U: return 48U;
         case 0x09U: return 20U;
         case 0x20U:
+        case 0x22U:
         case 0x80U:
         case 0x81U: return 64U;
         default: return 0U;
@@ -166,9 +172,104 @@ void dongle_dualsense_bt_unlock_leds(uint8_t seq, uint8_t bt_out[78])
         return;
     }
     uint8_t usb[48] = { 0x02U };
+    usb[2] = 0x40U;  /* valid_flag1: POWER_REDUCTION */
+    usb[37] = 0x00U; /* motor/trigger power reduction: 0% attenuation */
     usb[39] = 0x02U; /* valid_flag2: LIGHTBAR_SETUP_CONTROL_ENABLE */
     usb[42] = 0x02U; /* lightbar_setup: LIGHT_OUT */
     (void)dongle_dualsense_usb_to_bt_output(usb, sizeof(usb), seq, bt_out);
+}
+
+void dongle_dualsense_normalize_usb_output(uint8_t usb_report[48],
+                                           uint16_t fw_update_ver)
+{
+    if (!usb_report || usb_report[0] != 0x02U) {
+        return;
+    }
+    if ((usb_report[1] & 0x01U) != 0U || (usb_report[39] & 0x04U) != 0U) {
+        usb_report[1] |= 0x02U; /* HAPTICS_SELECT */
+        if (fw_update_ver > 0U && fw_update_ver < 0x0224U &&
+            (usb_report[39] & 0x04U) != 0U) {
+            usb_report[1] |= 0x03U; /* Legacy COMPATIBLE_VIBRATION + HAPTICS_SELECT */
+            usb_report[39] &= (uint8_t)(~0x04U & 0xFFU);
+        }
+    }
+}
+
+bool dongle_dualsense_from_xinput_output(const uint8_t *xinput, size_t size,
+                                         uint8_t ds_usb[48])
+{
+    if (!xinput || !ds_usb || size < 8U ||
+        xinput[0] != 0x00U || xinput[1] != 0x08U) {
+        return false;
+    }
+    memset(ds_usb, 0, 48U);
+    ds_usb[0] = 0x02U;
+    ds_usb[1] = 0x02U;  /* HAPTICS_SELECT */
+    ds_usb[39] = 0x04U; /* COMPATIBLE_VIBRATION2 */
+    ds_usb[3] = xinput[4]; /* Weak / right motor */
+    ds_usb[4] = xinput[3]; /* Strong / left motor */
+    return true;
+}
+
+bool dongle_dualsense_from_ps4_output(const uint8_t *ps4, size_t size,
+                                      uint8_t ds_usb[48])
+{
+    if (!ps4 || !ds_usb || size < 9U || ps4[0] != 0x05U) {
+        return false;
+    }
+    const bool has_rumble = (ps4[1] & 0x01U) != 0U;
+    const bool has_led = (ps4[1] & 0x02U) != 0U;
+    if (!has_rumble && !has_led) {
+        return false;
+    }
+    memset(ds_usb, 0, 48U);
+    ds_usb[0] = 0x02U;
+    if (has_rumble) {
+        ds_usb[1] = 0x02U;
+        ds_usb[39] = 0x04U;
+        ds_usb[3] = ps4[4];
+        ds_usb[4] = ps4[5];
+    }
+    if (has_led) {
+        ds_usb[2] = 0x04U;
+        ds_usb[45] = ps4[6];
+        ds_usb[46] = ps4[7];
+        ds_usb[47] = ps4[8];
+    }
+    return true;
+}
+
+static uint8_t switch_rumble_side_amplitude(const uint8_t b[4])
+{
+    if ((b[0] == 0U && b[1] == 0U && b[2] == 0U && b[3] == 0U) ||
+        (b[0] == 0U && (b[1] & 0xFEU) == 0U && (b[2] & 0x7FU) == 0x40U &&
+         b[3] == 0x40U)) {
+        return 0U;
+    }
+    const uint32_t hf_raw = (uint32_t)(b[1] & 0xFEU);
+    uint32_t hf = hf_raw >= 0xC8U ? 255U : (hf_raw * 255U) / 0xC8U;
+    uint32_t lf = 0U;
+    if (b[3] >= 0x40U) {
+        const uint32_t lf_steps =
+            ((uint32_t)(b[3] - 0x40U) * 2U) + ((b[2] & 0x80U) != 0U ? 1U : 0U);
+        lf = lf_steps >= 100U ? 255U : (lf_steps * 255U) / 100U;
+    }
+    return (uint8_t)(hf > lf ? hf : lf);
+}
+
+bool dongle_dualsense_from_switch_rumble(const uint8_t *sw, size_t size,
+                                         uint8_t ds_usb[48])
+{
+    if (!sw || !ds_usb || size < 10U || (sw[0] != 0x01U && sw[0] != 0x10U)) {
+        return false;
+    }
+    memset(ds_usb, 0, 48U);
+    ds_usb[0] = 0x02U;
+    ds_usb[1] = 0x02U;
+    ds_usb[39] = 0x04U;
+    ds_usb[4] = switch_rumble_side_amplitude(&sw[2]); /* Left */
+    ds_usb[3] = switch_rumble_side_amplitude(&sw[6]); /* Right */
+    return true;
 }
 
 void dongle_dualsense_merge_usb_output(uint8_t dst[48], const uint8_t src[48])

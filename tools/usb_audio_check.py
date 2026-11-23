@@ -143,6 +143,24 @@ def analyze_sbc_rtp_packet(packet):
     }
 
 
+def analyze_pcm16_mono(pcm_bytes):
+    if len(pcm_bytes) % 2 != 0:
+        pcm_bytes = pcm_bytes[:-1]
+    peak = 0
+    nonzero = 0
+    for (sample,) in struct.iter_unpack("<h", pcm_bytes):
+        mag = abs(sample)
+        if mag > 0:
+            nonzero += 1
+        if mag > peak:
+            peak = mag
+    return {
+        "samples": len(pcm_bytes) // 2,
+        "peak": peak,
+        "nonzero_samples": nonzero,
+    }
+
+
 def read_audio_metrics(port, sequence=450, timeout=3.0):
     data = _request(port, usb_hid_check.CMD_GET_AUDIO_METRICS, sequence, b"", timeout)
     if data and data[0] in (2, 8):
@@ -151,11 +169,15 @@ def read_audio_metrics(port, sequence=450, timeout=3.0):
         raise ValueError(f"invalid audio metrics response: {data.hex()}")
     peak_l, peak_r, nonzero_packets = struct.unpack_from("<HHI", data, 3)
     return {
-        "avrcp_connected": bool(data[1]),
+        "avrcp_connected": bool(data[1] & 0x01),
+        "hfp_slc_ready": bool(data[1] & 0x02),
+        "hfp_sco_open": bool(data[1] & 0x04),
+        "hfp_msbc_active": bool(data[1] & 0x08),
         "avrcp_volume": data[2],
         "peak_l": peak_l,
         "peak_r": peak_r,
         "nonzero_packets": nonzero_packets,
+        "link_roles": data[11],
     }
 
 
@@ -213,7 +235,11 @@ def _find_windows_wave_device(is_input, vid=None, pid=None):
                 iface_lower = iface_buf.value.lower()
                 if any(tag in iface_lower for tag in tags):
                     return index, caps.szPname
-        if fallback is None and ("Bluetooth Gamepads" in caps.szPname or "Uni USB Dongle" in caps.szPname):
+        if fallback is None and (
+            "Bluetooth Gamepads" in caps.szPname
+            or "Uni USB Dongle" in caps.szPname
+            or "DualSense Wireless Controller" in caps.szPname
+        ):
             fallback = (index, caps.szPname)
 
     if fallback is not None:
@@ -421,7 +447,8 @@ def main():
     parser.add_argument("--amplitude", type=int, default=8000, help="sine wave peak amplitude (1..24000, default 8000)")
     parser.add_argument("--capture", type=Path, help="capture one encoded SBC RTP packet for offline diagnosis")
     parser.add_argument("--inspect-capture", type=Path, help="inspect an existing captured SBC RTP packet offline")
-    parser.add_argument("--mic", action="store_true", help="record 16 kHz mono PCM from the Windows waveIn microphone device")
+    parser.add_argument("--mic", "--check-mic", dest="mic", action="store_true", help="record 16 kHz mono PCM from the Windows waveIn microphone device")
+    parser.add_argument("--require-mic-energy", action="store_true", help="with --mic/--check-mic, fail if all captured PCM samples are zero")
     args = parser.parse_args()
     if args.inspect_capture:
         summary = analyze_sbc_rtp_packet(args.inspect_capture.read_bytes())
@@ -442,6 +469,14 @@ def main():
         expected = args.seconds * 16000 * 2
         if not expected * 0.90 <= received <= expected * 1.10:
             raise ValueError(f"recorded {received} USB mic PCM bytes, expected about {expected}")
+        pcm_stats = analyze_pcm16_mono(captured)
+        print(
+            f"Mic PCM stats: samples={pcm_stats['samples']} peak={pcm_stats['peak']} "
+            f"nonzero={pcm_stats['nonzero_samples']}",
+            flush=True,
+        )
+        if args.require_mic_energy and pcm_stats["peak"] == 0:
+            raise ValueError("recorded USB mic PCM is completely silent (peak == 0)")
         print(f"PASS: recorded {received} USB mic PCM bytes from waveIn:{mic_id} ({mic_name})")
         return
     if os.name == "nt":

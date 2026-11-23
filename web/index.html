@@ -1,96 +1,302 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Uni USB Dongle</title>
-    <link rel="stylesheet" href="./styles.css">
-  </head>
-  <body>
-    <main>
-      <header>
-        <p class="eyebrow">M62-12F-Kit</p>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Uni USB Dongle Control Center</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand-group">
         <h1>Uni USB Dongle</h1>
-        <p>Configure and update your dongle over USB.</p>
-      </header>
+        <div class="pill-row">
+          <span class="pill" id="connectionState">Disconnected</span>
+          <span class="pill pill-accent" id="headerProfilePill">Profile: --</span>
+          <span class="pill" id="headerCapabilities">Capabilities: --</span>
+        </div>
+      </div>
 
-      <section>
-        <div class="section-heading">
+      <div class="connect-controls">
+        <label class="transport-label" for="transport">Transport</label>
+        <select id="transport" aria-label="Transport">
+          <option value="hid" selected>WebHID (recommended)</option>
+          <option value="serial">USB Serial (CDC fallback)</option>
+        </select>
+        <button id="connectBtn" class="btn-primary">Connect</button>
+        <button id="disconnectBtn" disabled>Disconnect</button>
+        <button id="refreshBtn" disabled>Refresh</button>
+      </div>
+    </div>
+    <div class="status-bar" id="statusBar" role="status" aria-live="polite">
+      <span id="statusText">Choose WebHID and click Connect to manage your dongle.</span>
+      <button id="reconnectBannerBtn" class="btn-small" hidden>Reconnect Dongle</button>
+    </div>
+    <nav class="tablist" role="tablist" aria-label="Dongle configuration sections">
+      <button class="tab-btn active" role="tab" id="tabBtn-overview" aria-selected="true" aria-controls="panel-overview" data-tab="overview" tabindex="0">Overview &amp; Profile</button>
+      <button class="tab-btn" role="tab" id="tabBtn-devices" aria-selected="false" aria-controls="panel-devices" data-tab="devices" tabindex="-1">Devices</button>
+      <button class="tab-btn" role="tab" id="tabBtn-audio" aria-selected="false" aria-controls="panel-audio" data-tab="audio" tabindex="-1">Audio &amp; Mic</button>
+      <button class="tab-btn" role="tab" id="tabBtn-diagnostics" aria-selected="false" aria-controls="panel-diagnostics" data-tab="diagnostics" tabindex="-1">Diagnostics</button>
+      <button class="tab-btn" role="tab" id="tabBtn-firmware" aria-selected="false" aria-controls="panel-firmware" data-tab="firmware" tabindex="-1">Firmware &amp; Log</button>
+    </nav>
+  </header>
+
+  <main class="container">
+    <section class="tabpanel" role="tabpanel" id="panel-overview" aria-labelledby="tabBtn-overview" data-panel="overview">
+      <div class="summary-grid">
+        <article class="card metric-card">
+          <h2>Active USB Profile</h2>
+          <p class="hero-value" id="overviewProfileName">--</p>
+          <p class="muted" id="overviewProfileMeta">VID:PID -- · Not persisted</p>
+        </article>
+        <article class="card metric-card">
+          <h2>Controllers</h2>
+          <p class="hero-value" id="overviewControllers">0 / 2 Connected</p>
+          <p class="muted" id="overviewControllersMeta">No paired controller slots</p>
+        </article>
+        <article class="card metric-card">
+          <h2>Bluetooth Audio</h2>
+          <p class="hero-value" id="overviewAudio">Not Paired</p>
+          <p class="muted" id="overviewAudioMeta">A2DP idle</p>
+        </article>
+        <article class="card metric-card">
+          <h2>Microphone</h2>
+          <p class="hero-value" id="overviewMic">--</p>
+          <p class="muted" id="overviewMicMeta">Host mic capture idle</p>
+        </article>
+      </div>
+
+      <section class="card">
+        <div class="card-header">
           <div>
-            <h2>Connection</h2>
-            <p id="connection">Disconnected</p>
+            <h2>Output Profile &amp; Boot Default</h2>
+            <p class="muted">Select how the dongle presents connected controllers over USB. Switching profiles briefly re-enumerates USB (including VID:PID changes on console profiles).</p>
           </div>
-          <div class="actions">
-            <select id="transport" aria-label="USB connection method">
-              <option value="hid">WebHID</option>
-              <option value="serial">USB serial (legacy firmware)</option>
+          <span class="pill" id="profileTransitionBadge">Idle</span>
+        </div>
+
+        <div class="profile-grid" id="profileCards" role="radiogroup" aria-label="USB Output Profile">
+          <button type="button" class="profile-option" data-profile="0" role="radio" aria-checked="false">
+            <strong>Generic HID</strong>
+            <span>FFFF:FFFF · Standard 2-gamepad mode</span>
+          </button>
+          <button type="button" class="profile-option" data-profile="1" role="radio" aria-checked="false">
+            <strong>Xbox 360 (XInput)</strong>
+            <span>045E:028E · Native Windows XInput + rumble</span>
+          </button>
+          <button type="button" class="profile-option" data-profile="2" role="radio" aria-checked="false">
+            <strong>DualShock 4 (PS4)</strong>
+            <span>054C:09CC · PS4 HID + rumble translation</span>
+          </button>
+          <button type="button" class="profile-option" data-profile="3" role="radio" aria-checked="false">
+            <strong>Switch Pro</strong>
+            <span>057E:2009 · Switch HID + HD rumble</span>
+          </button>
+          <button type="button" class="profile-option" data-profile="4" role="radio" aria-checked="false">
+            <strong>DualSense (PS5)</strong>
+            <span>054C:0CE6 · Full native rumble &amp; triggers</span>
+          </button>
+        </div>
+
+        <div class="form-row">
+          <label class="field-label">
+            Preferred Audio Codec
+            <select id="codecSelect" disabled>
+              <option value="0">Auto (SBC)</option>
+              <option value="1">SBC 44.1 kHz Stereo</option>
             </select>
-            <button id="connect">Connect</button>
-            <button id="disconnect" disabled>Disconnect</button>
+          </label>
+          <label class="checkbox-label">
+            <input id="persistProfileCheckbox" type="checkbox" checked disabled>
+            Save selected profile as boot default in flash
+          </label>
+          <button id="applyProfileBtn" class="btn-primary" disabled>Apply Profile</button>
+        </div>
+        <p class="muted" id="profileStatusNote">Connect to inspect active and saved boot profile settings.</p>
+      </section>
+    </section>
+
+    <section class="tabpanel" role="tabpanel" id="panel-devices" aria-labelledby="tabBtn-devices" data-panel="devices" hidden>
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <h2>Paired Controllers</h2>
+            <p class="muted">Up to 2 saved controller slots. Selecting a controller routes single-player input; Never Connect removes it and blocks future connections.</p>
+          </div>
+          <span class="muted">Selected Slot: <strong id="selectedSlot">--</strong></span>
+        </div>
+        <div id="controllers"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <h2>Paired Bluetooth Headphone</h2>
+            <p class="muted">Supports A2DP stereo playback, AVRCP volume, and on-demand HFP microphone capture.</p>
           </div>
         </div>
-        <p id="device-status" role="status">No device status received.</p>
-        <div class="actions">
-          <select id="output-profile" aria-label="USB output profile" disabled>
-            <option value="0">Generic HID</option>
-            <option value="1">Xbox 360 (XInput)</option>
-            <option value="2">DualShock 4 (PS4)</option>
-            <option value="3">Switch Pro</option>
-            <option value="4">DualSense (PS5)</option>
-          </select>
-          <button id="apply-profile" disabled>Apply profile</button>
-        </div>
-        <p id="profile-status">Connect to inspect USB output profile.</p>
+        <div id="headphoneCard" class="device-detail">No paired headphone data yet.</div>
       </section>
 
-      <section>
-        <h2>Controllers</h2>
-        <p id="pairing-status">Connect to read controller slots.</p>
-        <div class="actions">
-          <button id="discover" disabled>Discover</button>
-          <select id="discovered" aria-label="Discovered Bluetooth device"><option value="">Choose a device</option></select>
-          <button id="pair" disabled>Pair controller</button>
-          <button id="pair-audio" disabled>Pair headphone</button>
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <h2>Scan &amp; Pair Nearby Devices</h2>
+            <p class="muted">Put your controller (Create + PS) or headset into pairing mode before scanning.</p>
+          </div>
+          <button id="discoverBtn" class="btn-primary" disabled>Scan Nearby Devices</button>
         </div>
-        <p>DualSense: hold Create + PS until the light flashes. Theater U: hold Power/Bluetooth until “Pairing”. Then discover and choose the device.</p>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr><th>Slot</th><th>Address</th><th>State</th><th>Output</th><th>Actions</th></tr>
-            </thead>
-            <tbody id="controllers"></tbody>
-          </table>
+        <div id="discoveryResults" class="device-list">
+          <p class="muted">Run a Bluetooth scan to list nearby Classic Bluetooth devices.</p>
         </div>
       </section>
 
-      <section>
-        <h2>Audio</h2>
-        <p id="audio-status">Connect to read audio capability.</p>
-        <p>Select “Bluetooth Gamepads + Stereo Audio” as your computer’s sound output. Stereo playback uses SBC at 44.1 kHz. Adjust volume on your computer or neckband speaker.</p>
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <h2>Never Connect Blocklist</h2>
+            <p class="muted" id="blocklistNote">Blocked MAC addresses (up to 6) are refused during pairing, incoming connections, and auto-reconnect.</p>
+          </div>
+        </div>
+        <div class="form-row">
+          <input id="blockMacInput" type="text" placeholder="AA:BB:CC:DD:EE:FF" aria-label="Bluetooth address to block" disabled>
+          <button id="blockMacBtn" disabled>Add to Never Connect</button>
+        </div>
+        <div id="blocklistList" class="device-list"></div>
+      </section>
+    </section>
+
+    <section class="tabpanel" role="tabpanel" id="panel-audio" aria-labelledby="tabBtn-audio" data-panel="audio" hidden>
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <h2>Microphone Source</h2>
+            <p class="muted">Choose which Bluetooth device feeds the dongle USB microphone (`16 kHz mono`, <strong>Auto</strong> prefers Headphone HFP then DualSense).</p>
+          </div>
+        </div>
+        <div class="form-row">
+          <label class="field-label">
+            Active Routing Preference
+            <select id="micSourceSelect" disabled>
+              <option value="0">Auto (Headphone → Controller)</option>
+              <option value="1">Bluetooth Headphone (HFP)</option>
+              <option value="2">Controller 1 (DualSense)</option>
+              <option value="3">Controller 2 (DualSense)</option>
+              <option value="4">Off (Muted)</option>
+            </select>
+          </label>
+          <button id="applyMicSourceBtn" class="btn-primary" disabled>Apply Mic Source</button>
+        </div>
+        <div id="micStatusBox" class="metrics-grid">
+          <div class="metric-item"><span class="muted">Configured Source</span><strong id="micConfigured">--</strong></div>
+          <div class="metric-item"><span class="muted">Active Source</span><strong id="micActive">--</strong></div>
+          <div class="metric-item"><span class="muted">Active Codec</span><strong id="micCodec">--</strong></div>
+          <div class="metric-item"><span class="muted">USB Mic Host Stream</span><strong id="micHostState">--</strong></div>
+          <div class="metric-item"><span class="muted">Decoded / Errors</span><strong id="micFrames">--</strong></div>
+        </div>
+        <div class="meter-block">
+          <div class="meter-row">
+            <span>Mic Input Level</span>
+            <progress id="micPeakBar" max="32767" value="0"></progress>
+            <span id="micPeakText">0</span>
+          </div>
+        </div>
       </section>
 
-      <section>
-        <h2>Firmware update</h2>
-        <p class="warning">
-          The current SDK partition map aliases inactive FW slot 1 with
-          <code>mfg</code> at <code>0x210000</code>. Updating may erase
-          manufacturing data. This browser updater is not a recovery path;
-          keep UART ROM recovery available.
-        </p>
-        <label for="firmware">SDK XZ OTA package</label>
-        <input id="firmware" type="file" accept=".ota,.xz">
-        <label class="consent">
-          <input id="confirm-mfg" type="checkbox">
-          I have backed up the flash or confirmed the overlapping mfg data is disposable.
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <h2>Stereo Playback &amp; Audio Stream</h2>
+            <p class="muted">44.1 kHz UAC1 stereo playback over Bluetooth SBC.</p>
+          </div>
+        </div>
+        <div class="metrics-grid">
+          <div class="metric-item"><span class="muted">Playback Link</span><strong id="audioPlaybackState">--</strong></div>
+          <div class="metric-item"><span class="muted">AVRCP Volume</span><strong id="audioAvrcpState">--</strong></div>
+          <div class="metric-item"><span class="muted">Non-zero Packets</span><strong id="audioNonzero">--</strong></div>
+          <div class="metric-item"><span class="muted">USB / BT Bytes</span><strong id="audioBytes">--</strong></div>
+        </div>
+        <div class="meter-block">
+          <div class="meter-row">
+            <span>Playback Left Peak</span>
+            <progress id="audioPeakLeftBar" max="32767" value="0"></progress>
+            <span id="audioPeakLeftText">0</span>
+          </div>
+          <div class="meter-row">
+            <span>Playback Right Peak</span>
+            <progress id="audioPeakRightBar" max="32767" value="0"></progress>
+            <span id="audioPeakRightText">0</span>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <section class="tabpanel" role="tabpanel" id="panel-diagnostics" aria-labelledby="tabBtn-diagnostics" data-panel="diagnostics" hidden>
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <h2>Live Hardware Diagnostics</h2>
+            <p class="muted">Inspect Bluetooth link roles, USB endpoint counters, and DualSense rumble / adaptive trigger output frames.</p>
+          </div>
+          <div class="toolbar">
+            <label class="checkbox-label">
+              <input id="autoRefreshDiag" type="checkbox">
+              Auto-refresh (1s)
+            </label>
+            <button id="refreshDiagBtn" disabled>Refresh Now</button>
+            <button id="copyDiagBtn" disabled>Copy JSON Snapshot</button>
+          </div>
+        </div>
+        <div id="diagRadioBox" class="diag-grid"></div>
+      </section>
+
+      <section class="card">
+        <h2>USB Gamepad Interfaces (`0x16`)</h2>
+        <div id="diagGamepadBox" class="diag-two-col"></div>
+      </section>
+
+      <section class="card">
+        <h2>DualSense Passthrough, Rumble &amp; Triggers (`0x21`)</h2>
+        <div id="diagDualsenseBox" class="diag-two-col"></div>
+      </section>
+
+      <section class="card">
+        <h2>Microphone Pipeline Counters (`0x22`)</h2>
+        <div id="diagMicBox" class="diag-grid"></div>
+      </section>
+    </section>
+
+    <section class="tabpanel" role="tabpanel" id="panel-firmware" aria-labelledby="tabBtn-firmware" data-panel="firmware" hidden>
+      <section class="card">
+        <h2>Firmware Update (.xz.ota)</h2>
+        <p class="muted">Upload a built `uni_usb_dongle_bl616.xz.ota` image over WebHID feature reports or USB CDC serial.</p>
+        <div class="form-row">
+          <input id="otaFile" type="file" accept=".ota,.xz,.bin" disabled>
+          <span class="muted" id="otaSummary">Select an XZ OTA package after connecting.</span>
+        </div>
+        <label class="checkbox-label">
+          <input id="mfgAck" type="checkbox">
+          I understand firmware slot 1 overlaps `mfg` on this board; boot2 is not updated.
         </label>
-        <button id="update" disabled>Start OTA</button>
+        <div class="form-row">
+          <button id="uploadBtn" class="btn-primary" disabled>Upload Firmware</button>
+          <button id="abortBtn" disabled>Abort OTA</button>
+          <progress id="progress" max="1" value="0"></progress>
+          <span id="progressText">0%</span>
+        </div>
       </section>
 
-      <section>
-        <h2>Activity</h2>
-        <pre id="output" aria-live="polite"></pre>
+      <section class="card">
+        <div class="card-header">
+          <h2>Activity Log</h2>
+          <button id="clearLogBtn">Clear Log</button>
+        </div>
+        <pre id="log"></pre>
       </section>
-    </main>
-    <script type="module" src="./app.mjs"></script>
-  </body>
+    </section>
+  </main>
+
+  <script type="module" src="./app.mjs"></script>
+</body>
 </html>

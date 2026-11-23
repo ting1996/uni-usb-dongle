@@ -19,25 +19,34 @@ endif()
 foreach(function easyflash_init ef_get_env_blob_offset ef_get_env_blob ef_set_env_blob ef_del_env)
     sdk_add_link_options("-Wl,--wrap=${function}")
 endforeach()
-sdk_add_include_directories(${BL_SDK_BASE}/components/wireless/bluetooth/blestack/src/include)
+sdk_add_include_directories(
+    ${BL_SDK_BASE}/components/wireless/bluetooth/blestack/src/include
+    ${BL_SDK_BASE}/components/multimedia/opus/include
+)
 target_sources(app PRIVATE
     ../src/core/audio_stream.c
+    ../src/core/device_blocklist.c
     ../src/core/device_catalog.c
     ../src/core/dualsense.c
+    ../src/core/dualsense_mic.c
     ../src/core/gamepad_router.c
+    ../src/core/hfp_ag.c
     ../src/core/hid_transport.c
     ../src/core/output_profile.c
+    ../src/core/prefs_codec.c
     ../src/core/settings_codec.c
     ../src/core/usb_ota_protocol.c
     src/settings_store.c
     src/bluetooth_storage.c
     src/bluetooth.c
+    src/mic_pipeline.c
     src/usb_audio.c
     src/usb_gamepad.c
     src/usb_hid_transport.c
     src/usb_ota_service.c
     src/usb_profiles.c
 )
+target_link_libraries(app ${BL_SDK_BASE}/components/multimedia/opus/libopus.a)
 sdk_set_main_file(main.c)
 
 project(uni_usb_dongle)

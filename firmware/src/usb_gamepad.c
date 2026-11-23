@@ -23,8 +23,8 @@
 extern void dongle_bluetooth_local_address(uint8_t out[6]);
 extern size_t dongle_bluetooth_dualsense_feature(
     uint8_t slot, uint8_t report_id, uint8_t *out, size_t capacity);
-extern void dongle_bluetooth_send_dualsense_output(
-    uint8_t slot, const uint8_t *usb_report, size_t size);
+extern void dongle_bluetooth_send_dualsense_output_ex(
+    uint8_t slot, const uint8_t *usb_report, size_t size, uint8_t path_flags);
 extern bool dongle_bluetooth_send_dualsense_feature(
     uint8_t slot, const uint8_t *usb_report, size_t size);
 
@@ -80,6 +80,7 @@ static const uint8_t neutral_report[DONGLE_USB_GAMEPAD_REPORT_SIZE] = {
 static uint8_t gamepad_bus;
 static volatile bool configured;
 static volatile bool reset_pending;
+static volatile bool out_ep_dedicated;
 static volatile bool busy[DONGLE_USB_GAMEPAD_COUNT];
 static volatile bool rx_busy[DONGLE_USB_GAMEPAD_COUNT];
 static bool pending[DONGLE_USB_GAMEPAD_COUNT];
@@ -202,34 +203,64 @@ static void gamepad_out_complete(uint8_t busid, uint8_t ep, uint32_t nbytes)
         ep >= GAMEPAD_FIRST_OUT_EP + DONGLE_USB_GAMEPAD_COUNT) {
         return;
     }
-    const uint8_t i = (uint8_t)(ep - GAMEPAD_FIRST_OUT_EP);
+    const uint8_t i = out_ep_dedicated
+        ? (ep == dongle_usb_profile_gamepad_out_ep(0U) ? 0U : DONGLE_USB_GAMEPAD_COUNT)
+        : (uint8_t)(ep - GAMEPAD_FIRST_OUT_EP);
+    if (i >= active_gamepad_count()) {
+        return;
+    }
     rx_busy[i] = false;
     const dongle_output_profile_t profile = dongle_usb_profile();
+    const uint8_t path_flags = (uint8_t)(0x01U | (out_ep_dedicated ? 0x04U : 0U));
     if (profile == DONGLE_PROFILE_DUALSENSE) {
         if (nbytes >= DONGLE_DUALSENSE_USB_OUTPUT_SIZE &&
             nbytes <= sizeof(rx_buffer[i]) && rx_buffer[i][0] == 0x02U) {
-            dongle_bluetooth_send_dualsense_output(i, rx_buffer[i], nbytes);
+            dongle_bluetooth_send_dualsense_output_ex(
+                i, rx_buffer[i], nbytes, path_flags);
         }
-        return;
-    }
-    if (profile != DONGLE_PROFILE_SWITCH || nbytes == 0U ||
-        nbytes > sizeof(rx_buffer[i])) {
-        return;
-    }
-    if (nbytes >= 2U && rx_buffer[i][0] == 0x80U) {
-        if (rx_buffer[i][1] == 0x04U) {
-            switch_streaming[i] = true;
-        } else if (rx_buffer[i][1] == 0x05U) {
-            switch_streaming[i] = false;
+    } else if (profile == DONGLE_PROFILE_XINPUT) {
+        uint8_t ds_out[DONGLE_DUALSENSE_USB_OUTPUT_SIZE];
+        if (nbytes <= sizeof(rx_buffer[i]) &&
+            dongle_dualsense_from_xinput_output(rx_buffer[i], nbytes, ds_out)) {
+            dongle_bluetooth_send_dualsense_output_ex(
+                i, ds_out, sizeof(ds_out), (uint8_t)(path_flags | 0x08U));
+        }
+    } else if (profile == DONGLE_PROFILE_PS4) {
+        uint8_t ds_out[DONGLE_DUALSENSE_USB_OUTPUT_SIZE];
+        if (nbytes <= sizeof(rx_buffer[i]) &&
+            dongle_dualsense_from_ps4_output(rx_buffer[i], nbytes, ds_out)) {
+            dongle_bluetooth_send_dualsense_output_ex(
+                i, ds_out, sizeof(ds_out), (uint8_t)(path_flags | 0x08U));
+        }
+    } else if (profile == DONGLE_PROFILE_SWITCH && nbytes > 0U &&
+               nbytes <= sizeof(rx_buffer[i])) {
+        uint8_t ds_out[DONGLE_DUALSENSE_USB_OUTPUT_SIZE];
+        if (dongle_dualsense_from_switch_rumble(rx_buffer[i], nbytes, ds_out)) {
+            dongle_bluetooth_send_dualsense_output_ex(
+                i, ds_out, sizeof(ds_out), (uint8_t)(path_flags | 0x08U));
+        }
+        if (nbytes >= 2U && rx_buffer[i][0] == 0x80U) {
+            if (rx_buffer[i][1] == 0x04U) {
+                switch_streaming[i] = true;
+            } else if (rx_buffer[i][1] == 0x05U) {
+                switch_streaming[i] = false;
+            }
+        }
+        uint8_t mac[6];
+        slot_address(i, mac);
+        const size_t reply_len = dongle_switch_reply(
+            rx_buffer[i], nbytes, reports[i], tx_counter[i], mac,
+            switch_reply_buf[i]);
+        if (reply_len > 0U) {
+            switch_reply_pending[i] = true;
         }
     }
-    uint8_t mac[6];
-    slot_address(i, mac);
-    const size_t reply_len = dongle_switch_reply(
-        rx_buffer[i], nbytes, reports[i], tx_counter[i], mac,
-        switch_reply_buf[i]);
-    if (reply_len > 0U) {
-        switch_reply_pending[i] = true;
+    if (out_ep_dedicated && configured && !reset_pending) {
+        rx_busy[0] = true;
+        if (usbd_ep_start_read(gamepad_bus, dongle_usb_profile_gamepad_out_ep(0U),
+                               rx_buffer[0], sizeof(rx_buffer[0])) != 0) {
+            rx_busy[0] = false;
+        }
     }
 }
 
@@ -393,45 +424,82 @@ static void gamepad_task(void *argument)
             const bool idle_due = idle_rate[i] != 0U &&
                 (TickType_t)(now - last_sent[i]) >=
                     pdMS_TO_TICKS((uint32_t)idle_rate[i] * 4U);
-            /* Shared BL616 FIFO: never overlap IN write and OUT read on same ep_idx. */
-            if (!configured || busy[i] || rx_busy[i]) {
+            if (!configured) {
                 continue;
             }
-            if (profile == DONGLE_PROFILE_SWITCH) {
-                if (switch_reply_pending[i]) {
-                    memcpy(tx_buffer[i], switch_reply_buf[i], sizeof(tx_buffer[i]));
-                    busy[i] = true;
-                    if (usbd_ep_start_write(gamepad_bus, (uint8_t)(GAMEPAD_FIRST_EP + i),
-                                            tx_buffer[i], sizeof(tx_buffer[i])) == 0) {
-                        switch_reply_pending[i] = false;
-                        ++submitted[i];
-                        ++tx_counter[i];
-                        last_sent[i] = now;
-                    } else {
-                        busy[i] = false;
+            if (out_ep_dedicated) {
+                /* Dedicated FIFO F1 (EP 0x02): keep OUT read permanently armed
+                 * independently of IN FIFO F0 (EP 0x81). */
+                if (!rx_busy[0]) {
+                    rx_busy[0] = true;
+                    if (usbd_ep_start_read(gamepad_bus, dongle_usb_profile_gamepad_out_ep(0U),
+                                           rx_buffer[0], sizeof(rx_buffer[0])) != 0) {
+                        rx_busy[0] = false;
                     }
+                }
+                if (busy[0]) {
                     continue;
                 }
-                if (!switch_streaming[i] || out_fifo_bytes(i) > 0U) {
+                if (profile == DONGLE_PROFILE_SWITCH) {
+                    if (switch_reply_pending[0]) {
+                        memcpy(tx_buffer[0], switch_reply_buf[0], sizeof(tx_buffer[0]));
+                        busy[0] = true;
+                        if (usbd_ep_start_write(gamepad_bus, GAMEPAD_FIRST_EP,
+                                                tx_buffer[0], sizeof(tx_buffer[0])) == 0) {
+                            switch_reply_pending[0] = false;
+                            ++submitted[0];
+                            ++tx_counter[0];
+                            last_sent[0] = now;
+                        } else {
+                            busy[0] = false;
+                        }
+                        continue;
+                    }
+                    if (!switch_streaming[0]) {
+                        continue;
+                    }
+                }
+            } else {
+                /* Shared BL616 FIFO: never overlap IN write and OUT read on same ep_idx. */
+                if (busy[i] || rx_busy[i]) {
+                    continue;
+                }
+                if (profile == DONGLE_PROFILE_SWITCH) {
+                    if (switch_reply_pending[i]) {
+                        memcpy(tx_buffer[i], switch_reply_buf[i], sizeof(tx_buffer[i]));
+                        busy[i] = true;
+                        if (usbd_ep_start_write(gamepad_bus, (uint8_t)(GAMEPAD_FIRST_EP + i),
+                                                tx_buffer[i], sizeof(tx_buffer[i])) == 0) {
+                            switch_reply_pending[i] = false;
+                            ++submitted[i];
+                            ++tx_counter[i];
+                            last_sent[i] = now;
+                        } else {
+                            busy[i] = false;
+                        }
+                        continue;
+                    }
+                    if (!switch_streaming[i] || out_fifo_bytes(i) > 0U) {
+                        rx_busy[i] = true;
+                        if (usbd_ep_start_read(gamepad_bus, dongle_usb_profile_gamepad_out_ep(i),
+                                               rx_buffer[i], sizeof(rx_buffer[i])) != 0) {
+                            rx_busy[i] = false;
+                        }
+                        continue;
+                    }
+                } else if (profile != DONGLE_PROFILE_GENERIC && out_fifo_bytes(i) > 0U) {
                     rx_busy[i] = true;
-                    if (usbd_ep_start_read(gamepad_bus, (uint8_t)(GAMEPAD_FIRST_OUT_EP + i),
+                    if (usbd_ep_start_read(gamepad_bus, dongle_usb_profile_gamepad_out_ep(i),
                                            rx_buffer[i], sizeof(rx_buffer[i])) != 0) {
                         rx_busy[i] = false;
                     }
                     continue;
                 }
-            } else if (profile == DONGLE_PROFILE_DUALSENSE && out_fifo_bytes(i) > 0U) {
-                rx_busy[i] = true;
-                if (usbd_ep_start_read(gamepad_bus, (uint8_t)(GAMEPAD_FIRST_OUT_EP + i),
-                                       rx_buffer[i], sizeof(rx_buffer[i])) != 0) {
-                    rx_busy[i] = false;
+                if (profile != DONGLE_PROFILE_GENERIC && !fifo_is_empty(i)) {
+                    continue;
                 }
-                continue;
             }
             if (!pending[i] && !idle_due) {
-                continue;
-            }
-            if (profile == DONGLE_PROFILE_DUALSENSE && !fifo_is_empty(i)) {
                 continue;
             }
             const size_t report_len = encode_gamepad_report(i, profile, tx_buffer[i]);
@@ -461,18 +529,20 @@ void usbd_hid_get_report(uint8_t busid, uint8_t intf, uint8_t report_id,
     if (busid != gamepad_bus || data == NULL || *data == NULL) {
         return;
     }
-    if (intf == DONGLE_MANAGEMENT_INTERFACE &&
+    const uint8_t mgmt_intf = dongle_usb_profile_mgmt_interface();
+    const uint8_t first_gp_intf = dongle_usb_profile_gamepad_first_interface();
+    if (intf == mgmt_intf &&
         report_id == DONGLE_HID_REPORT_ID && report_type == 3U) {
         (*data)[0] = DONGLE_HID_REPORT_ID;
         dongle_usb_hid_get_feature(&(*data)[1]);
         *len = 1U + DONGLE_HID_FEATURE_SIZE;
         return;
     }
-    if (intf < DONGLE_USB_GAMEPAD_FIRST_INTERFACE ||
-        intf >= DONGLE_USB_GAMEPAD_FIRST_INTERFACE + active_gamepad_count()) {
+    if (intf < first_gp_intf ||
+        intf >= first_gp_intf + active_gamepad_count()) {
         return;
     }
-    const uint8_t slot = (uint8_t)(intf - DONGLE_USB_GAMEPAD_FIRST_INTERFACE);
+    const uint8_t slot = (uint8_t)(intf - first_gp_intf);
     const dongle_output_profile_t profile = dongle_usb_profile();
     if (report_type == 1U && profile != DONGLE_PROFILE_XINPUT) {
         const uint8_t expected_id =
@@ -548,43 +618,56 @@ void usbd_hid_get_report(uint8_t busid, uint8_t intf, uint8_t report_id,
 void usbd_hid_set_report(uint8_t busid, uint8_t intf, uint8_t report_id,
                          uint8_t report_type, uint8_t *report, uint32_t length)
 {
-    if (busid == gamepad_bus && intf == DONGLE_MANAGEMENT_INTERFACE &&
+    const uint8_t mgmt_intf = dongle_usb_profile_mgmt_interface();
+    const uint8_t first_gp_intf = dongle_usb_profile_gamepad_first_interface();
+    if (busid == gamepad_bus && intf == mgmt_intf &&
         report_id == DONGLE_HID_REPORT_ID && report_type == 3U &&
         length == 1U + DONGLE_HID_FEATURE_SIZE &&
         report[0] == DONGLE_HID_REPORT_ID) {
         dongle_usb_hid_set_feature(&report[1], DONGLE_HID_FEATURE_SIZE);
     } else if (busid == gamepad_bus &&
-               dongle_usb_profile() == DONGLE_PROFILE_DUALSENSE &&
-               intf >= DONGLE_USB_GAMEPAD_FIRST_INTERFACE &&
-               intf < DONGLE_USB_GAMEPAD_FIRST_INTERFACE + active_gamepad_count() &&
+               intf >= first_gp_intf &&
+               intf < first_gp_intf + active_gamepad_count() &&
                report != NULL) {
-        const uint8_t slot = (uint8_t)(intf - DONGLE_USB_GAMEPAD_FIRST_INTERFACE);
-        if (report_type == 2U && report_id == 0x02U &&
-            length >= DONGLE_DUALSENSE_USB_OUTPUT_SIZE && report[0] == 0x02U) {
-            dongle_bluetooth_send_dualsense_output(slot, report, length);
-        } else if (report_type == 3U && length >= 2U && report[0] == report_id) {
-            (void)dongle_bluetooth_send_dualsense_feature(slot, report, length);
+        const uint8_t slot = (uint8_t)(intf - first_gp_intf);
+        const dongle_output_profile_t profile = dongle_usb_profile();
+        if (profile == DONGLE_PROFILE_DUALSENSE) {
+            if (report_type == 2U && report_id == 0x02U &&
+                length >= DONGLE_DUALSENSE_USB_OUTPUT_SIZE && report[0] == 0x02U) {
+                dongle_bluetooth_send_dualsense_output_ex(slot, report, length, 0x02U);
+            } else if (report_type == 3U && length >= 2U && report[0] == report_id) {
+                (void)dongle_bluetooth_send_dualsense_feature(slot, report, length);
+            }
+        } else if (profile == DONGLE_PROFILE_PS4 && report_type == 2U &&
+                   report_id == 0x05U) {
+            uint8_t ds_out[DONGLE_DUALSENSE_USB_OUTPUT_SIZE];
+            if (dongle_dualsense_from_ps4_output(report, length, ds_out)) {
+                dongle_bluetooth_send_dualsense_output_ex(
+                    slot, ds_out, sizeof(ds_out), 0x02U | 0x08U);
+            }
         }
     }
 }
 
 uint8_t usbd_hid_get_idle(uint8_t busid, uint8_t intf, uint8_t report_id)
 {
+    const uint8_t first_gp_intf = dongle_usb_profile_gamepad_first_interface();
     if (busid != gamepad_bus || (report_id != 0U && report_id != 1U && report_id != 0x30U) ||
-        intf < DONGLE_USB_GAMEPAD_FIRST_INTERFACE ||
-        intf >= DONGLE_USB_GAMEPAD_FIRST_INTERFACE + active_gamepad_count()) {
+        intf < first_gp_intf ||
+        intf >= first_gp_intf + active_gamepad_count()) {
         return 0;
     }
-    return idle_rate[intf - DONGLE_USB_GAMEPAD_FIRST_INTERFACE];
+    return idle_rate[intf - first_gp_intf];
 }
 
 void usbd_hid_set_idle(uint8_t busid, uint8_t intf, uint8_t report_id,
                        uint8_t duration)
 {
+    const uint8_t first_gp_intf = dongle_usb_profile_gamepad_first_interface();
     if (busid == gamepad_bus && (report_id == 0U || report_id == 1U || report_id == 0x30U) &&
-        intf >= DONGLE_USB_GAMEPAD_FIRST_INTERFACE &&
-        intf < DONGLE_USB_GAMEPAD_FIRST_INTERFACE + active_gamepad_count()) {
-        idle_rate[intf - DONGLE_USB_GAMEPAD_FIRST_INTERFACE] = duration;
+        intf >= first_gp_intf &&
+        intf < first_gp_intf + active_gamepad_count()) {
+        idle_rate[intf - first_gp_intf] = duration;
     }
 }
 
@@ -593,11 +676,10 @@ void dongle_usb_gamepad_attach(uint8_t busid)
     gamepad_bus = busid;
     configured = false;
     reset_pending = false;
-    usbd_add_interface(busid, usbd_hid_init_intf(busid, &mgmt_interface,
-        mgmt_report_descriptor, sizeof(mgmt_report_descriptor)));
 
     const dongle_output_profile_t profile = dongle_usb_profile();
     const uint8_t gamepad_count = active_gamepad_count();
+    out_ep_dedicated = gamepad_count == 1U && profile != DONGLE_PROFILE_GENERIC;
     const uint8_t *desc = NULL;
     const uint16_t desc_len = dongle_usb_profile_report_descriptor(&desc);
     for (uint8_t i = 0U; i < gamepad_count; ++i) {
@@ -616,9 +698,12 @@ void dongle_usb_gamepad_attach(uint8_t busid)
         }
         usbd_add_endpoint(busid, &endpoints[i]);
         if (profile != DONGLE_PROFILE_GENERIC) {
+            out_endpoints[i].ep_addr = dongle_usb_profile_gamepad_out_ep(i);
             usbd_add_endpoint(busid, &out_endpoints[i]);
         }
     }
+    usbd_add_interface(busid, usbd_hid_init_intf(busid, &mgmt_interface,
+        mgmt_report_descriptor, sizeof(mgmt_report_descriptor)));
 }
 
 BaseType_t dongle_usb_gamepad_register(uint8_t busid)

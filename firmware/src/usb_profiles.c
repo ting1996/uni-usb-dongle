@@ -6,6 +6,8 @@
 #include <string.h>
 
 static volatile uint8_t active, requested, codec_requested, transition, failure;
+static volatile uint8_t saved_default;
+static volatile bool persisted_default;
 static volatile uint8_t active_gamepads = 1U, desired_gamepads = 1U;
 static TickType_t apply_at;
 static uint8_t config_fs[384], config_hs[384], config_other_fs[384], config_other_hs[384];
@@ -56,22 +58,23 @@ static const uint8_t dualsense_report[] = {
     0x85,8,0x09,0x34,0x95,0x2f,0xb1,2,
     0x85,9,0x09,0x24,0x95,0x13,0xb1,2,
     0x85,0x20,0x09,0x26,0x95,0x3f,0xb1,2,
+    0x85,0x22,0x09,0x27,0x95,0x3f,0xb1,2,
     0x85,0x80,0x09,0x28,0x95,0x3f,0xb1,2,
     0x85,0x81,0x09,0x29,0x95,0x3f,0xb1,2,
     0x85,0x85,0x09,0x2d,0x95,0x02,0xb1,2,
     0xc0
 };
-/* XUSB compatible IDs for the two gamepad interfaces, not the audio or HID
- * management interfaces. Format follows Microsoft OS descriptors v1. */
+/* XUSB compatible IDs for the gamepad interfaces (MI_03, MI_04), not the audio
+ * or HID management interfaces. Format follows Microsoft OS descriptors v1. */
 static const uint8_t msos_string[] = {18,3,'M',0,'S',0,'F',0,'T',0,'1',0,'0',0,'0',0,0x20,0};
 static const uint8_t compatible_ids_1[] = {
     40,0,0,0,0,1,4,0,1,0,0,0,0,0,0,0,
-    4,1,'X','U','S','B','1','0',0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    3,1,'X','U','S','B','1','0',0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 };
 static const uint8_t compatible_ids_2[] = {
     64,0,0,0,0,1,4,0,2,0,0,0,0,0,0,0,
+    3,1,'X','U','S','B','1','0',0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     4,1,'X','U','S','B','1','0',0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    5,1,'X','U','S','B','1','0',0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 };
 static const struct usb_msosv1_descriptor msos_1 = {
     .string = msos_string, .vendor_code = 0x20, .compat_id = compatible_ids_1,
@@ -81,8 +84,58 @@ static const struct usb_msosv1_descriptor msos_2 = {
 };
 
 extern uint16_t dongle_usb_gamepad_generic_descriptor(const uint8_t **descriptor);
+
+static void apply_device_identity(uint8_t profile)
+{
+    uint16_t vid = 0xffffU;
+    uint16_t pid = 0xffffU;
+    uint16_t bcd = 0x0104U;
+    if (profile == DONGLE_PROFILE_XINPUT) { vid = 0x045eU; pid = 0x028eU; }
+    if (profile == DONGLE_PROFILE_PS4) { vid = 0x054cU; pid = 0x09ccU; }
+    if (profile == DONGLE_PROFILE_SWITCH) { vid = 0x057eU; pid = 0x2009U; }
+    if (profile == DONGLE_PROFILE_DUALSENSE) { vid = 0x054cU; pid = 0x0ce6U; bcd = 0x0100U; }
+    device_descriptor[8] = (uint8_t)(vid & 0xffU);
+    device_descriptor[9] = (uint8_t)(vid >> 8U);
+    device_descriptor[10] = (uint8_t)(pid & 0xffU);
+    device_descriptor[11] = (uint8_t)(pid >> 8U);
+    device_descriptor[12] = (uint8_t)(bcd & 0xffU);
+    device_descriptor[13] = (uint8_t)(bcd >> 8U);
+}
+
+void dongle_usb_profile_init(uint8_t saved_profile, uint8_t saved_codec)
+{
+    if (saved_profile < DONGLE_PROFILE_COUNT) {
+        active = saved_profile;
+        requested = saved_profile;
+        saved_default = saved_profile;
+        persisted_default = true;
+    } else {
+        active = DONGLE_PROFILE_GENERIC;
+        requested = DONGLE_PROFILE_GENERIC;
+        saved_default = DONGLE_PROFILE_GENERIC;
+        persisted_default = false;
+    }
+    codec_requested = saved_codec <= 1U ? saved_codec : 0U;
+    transition = 0U;
+    failure = 0U;
+    apply_device_identity(active);
+}
+
 dongle_output_profile_t dongle_usb_profile(void) { return active; }
 uint8_t dongle_usb_profile_gamepad_count(void) { return active_gamepads == 2U ? 2U : 1U; }
+uint8_t dongle_usb_profile_gamepad_first_interface(void) { return 3U; }
+uint8_t dongle_usb_profile_mgmt_interface(void)
+{
+    return (uint8_t)(3U + dongle_usb_profile_gamepad_count());
+}
+uint8_t dongle_usb_profile_gamepad_out_ep(uint8_t slot)
+{
+    if (slot == 0U && dongle_usb_profile_gamepad_count() == 1U &&
+        active != DONGLE_PROFILE_GENERIC) {
+        return 0x02U;
+    }
+    return (uint8_t)(0x01U + slot);
+}
 uint16_t dongle_usb_profile_report_descriptor(const uint8_t **descriptor)
 {
     if (active == DONGLE_PROFILE_PS4) { *descriptor = ps4_report; return sizeof(ps4_report); }
@@ -103,20 +156,27 @@ bool dongle_usb_profile_set_connected_controllers(uint8_t connected_mask)
     }
     return transition == 1;
 }
-uint8_t dongle_usb_profile_request(uint8_t profile, uint8_t codec)
+uint8_t dongle_usb_profile_request(uint8_t profile, uint8_t codec, bool persist)
 {
     if (profile >= DONGLE_PROFILE_COUNT || codec > 3) return 1;
     if (codec > 1) return 8; /* AAC/LDAC encoders are not integrated. */
     if (transition == 1 || transition == 2) return 3;
     requested = profile; codec_requested = codec; failure = 0;
+    if (persist) {
+        saved_default = profile;
+        persisted_default = true;
+    }
     transition = (active == requested && active_gamepads == desired_gamepads) ? 0 : 1;
     apply_at = xTaskGetTickCount() + pdMS_TO_TICKS(300);
     return 0;
 }
 size_t dongle_usb_profile_state(uint8_t out[12])
 {
+    const uint8_t flags = (uint8_t)((persisted_default ? 0x01U : 0U) |
+                                    (active_gamepads == 2U ? 0x02U : 0U));
     const uint8_t state[12] = {0,1,active,requested,0x1f,codec_requested,
-        dongle_usb_audio_is_streaming() ? 1 : 0xff,3,transition,failure,0,0};
+        dongle_usb_audio_is_streaming() ? 1 : 0xff,3,transition,failure,
+        saved_default,flags};
     memcpy(out, state, sizeof(state)); return sizeof(state);
 }
 bool dongle_usb_profile_pending(void)
@@ -127,15 +187,7 @@ void dongle_usb_profile_activate(void)
 {
     transition = 2; active = requested;
     active_gamepads = desired_gamepads == 2U ? 2U : 1U;
-    uint16_t vid = 0xffff, pid = 0xffff;
-    if (active == DONGLE_PROFILE_XINPUT) { vid = 0x045e; pid = 0x028e; }
-    if (active == DONGLE_PROFILE_PS4) { vid = 0x054c; pid = 0x09cc; }
-    if (active == DONGLE_PROFILE_SWITCH) { vid = 0x057e; pid = 0x2009; }
-    if (active == DONGLE_PROFILE_DUALSENSE) { vid = 0x054c; pid = 0x0ce6; }
-    device_descriptor[8] = (uint8_t)(vid & 0xffU);
-    device_descriptor[9] = (uint8_t)(vid >> 8U);
-    device_descriptor[10] = (uint8_t)(pid & 0xffU);
-    device_descriptor[11] = (uint8_t)(pid >> 8U);
+    apply_device_identity(active);
 }
 const uint8_t *dongle_usb_profile_device(void) { return device_descriptor; }
 const struct usb_msosv1_descriptor *dongle_usb_profile_msos(void)
@@ -150,19 +202,16 @@ const uint8_t *dongle_usb_profile_config(uint8_t speed, bool other_speed)
     const uint8_t audio_hs[] = { DONGLE_AUDIO_DESCRIPTOR(4) };
     size_t n = 9;
     memcpy(out + n, hs ? audio_hs : audio_fs, sizeof(audio_fs)); n += sizeof(audio_fs);
-    const uint8_t management[] = {
-        9,4,3,0,1,3,0,0,0, 9,0x21,0x11,1,0,1,0x22,23,0,
-        7,5,0x85,3,64,0,(uint8_t)(hs ? 6 : 4)
-    };
-    memcpy(out + n, management, sizeof(management)); n += sizeof(management);
     const uint8_t *report;
     uint16_t length = dongle_usb_profile_report_descriptor(&report);
     const uint8_t gp_count = dongle_usb_profile_gamepad_count();
     for (unsigned i = 0; i < gp_count; ++i) {
-        uint8_t ep_in = (uint8_t)(0x81U + i), ep_out = (uint8_t)(1U + i);
+        const uint8_t intf_num = (uint8_t)(3U + i);
+        const uint8_t ep_in = (uint8_t)(0x81U + i);
+        const uint8_t ep_out = dongle_usb_profile_gamepad_out_ep((uint8_t)i);
         if (active == DONGLE_PROFILE_XINPUT) {
             const uint8_t xusb[] = {
-                9,4,(uint8_t)(4U + i),0,2,0xff,0x5d,1,0,
+                9,4,intf_num,0,2,0xff,0x5d,1,0,
                 17,0x21,0,1,1,0x25,ep_in,0x14,0,0,0,0,0x13,ep_out,8,0,0,
                 7,5,ep_in,3,32,0,(uint8_t)(hs ? 6 : 4), 7,5,ep_out,3,32,0,(uint8_t)(hs ? 6 : 4)
             };
@@ -170,7 +219,7 @@ const uint8_t *dongle_usb_profile_config(uint8_t speed, bool other_speed)
         } else {
             bool extra = active != DONGLE_PROFILE_GENERIC;
             const uint8_t hid[] = {
-                9,4,(uint8_t)(4U + i),0,(uint8_t)(extra ? 2 : 1),3,0,0,0,
+                9,4,intf_num,0,(uint8_t)(extra ? 2 : 1),3,0,0,0,
                 9,0x21,0x11,1,0,1,0x22,(uint8_t)(length & 255U),(uint8_t)(length >> 8U),
                 7,5,ep_in,3,(uint8_t)(extra ? 64 : 10),0,(uint8_t)(hs ? 6 : 4),
                 7,5,ep_out,3,64,0,(uint8_t)(hs ? 6 : 4)
@@ -179,6 +228,12 @@ const uint8_t *dongle_usb_profile_config(uint8_t speed, bool other_speed)
             memcpy(out + n, hid, size); n += size;
         }
     }
+    const uint8_t mgmt_intf = (uint8_t)(3U + gp_count);
+    const uint8_t management[] = {
+        9,4,mgmt_intf,0,1,3,0,0,0, 9,0x21,0x11,1,0,1,0x22,23,0,
+        7,5,0x85,3,64,0,(uint8_t)(hs ? 6 : 4)
+    };
+    memcpy(out + n, management, sizeof(management)); n += sizeof(management);
     const uint8_t header[] = {9,(uint8_t)(other_speed ? 7 : 2),(uint8_t)(n & 255U),(uint8_t)(n >> 8U),(uint8_t)(4U + gp_count),1,0,0x80,50};
     memcpy(out, header, sizeof(header));
     return out;
