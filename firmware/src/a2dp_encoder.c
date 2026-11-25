@@ -101,7 +101,7 @@ int dongle_a2dp_encoder_open(dongle_audio_codec_t codec,
             }
             AACENC_PARAM params = {
                 .sampleRate = (int)sample_rate_hz,
-                .bitRate = controller_active ? 192000 : 256000,
+                .bitRate = controller_active ? 160000 : 256000,
                 .nChannels = 2,
                 .adtsUsed = VOAAC_RAWDATA,
             };
@@ -118,15 +118,21 @@ int dongle_a2dp_encoder_open(dongle_audio_codec_t codec,
                 dongle_a2dp_encoder_close();
                 return -1;
             }
-            const int eqmid = controller_active ? LDACBT_EQMID_MQ : LDACBT_EQMID_HQ;
-            const int ldac_mtu = (int)(media_mtu > 13U ? (media_mtu - 13U) : 660U);
+            int ldac_mtu = (int)media_mtu;
+            if (ldac_mtu < 679) {
+                ldac_mtu = 679;
+            }
             /* channel_mode 0x01 = LDACBT_CHANNEL_MODE_STEREO */
             if (ldacBT_init_handle_encode(enc_state->u.ldac.handle,
-                                          ldac_mtu, eqmid, 0x01,
+                                          ldac_mtu, LDACBT_EQMID_MQ, 0x01,
                                           LDACBT_SMPL_FMT_S16,
                                           (int)sample_rate_hz) != 0) {
                 dongle_a2dp_encoder_close();
                 return -1;
+            }
+            if (controller_active) {
+                (void)ldacBT_alter_eqmid_priority(enc_state->u.ldac.handle,
+                                                  LDACBT_EQMID_INC_CONNECTION);
             }
             return 0;
         }
@@ -175,6 +181,54 @@ void dongle_a2dp_encoder_close(void)
     }
     vPortFree(enc_state);
     enc_state = NULL;
+}
+
+void dongle_a2dp_encoder_set_controller_active(bool controller_active)
+{
+    if (enc_state == NULL) {
+        return;
+    }
+    switch (enc_state->codec) {
+        case DONGLE_AUDIO_CODEC_LDAC:
+            if (enc_state->u.ldac.handle != NULL) {
+                (void)ldacBT_set_eqmid(enc_state->u.ldac.handle, LDACBT_EQMID_MQ);
+                if (controller_active) {
+                    (void)ldacBT_alter_eqmid_priority(enc_state->u.ldac.handle,
+                                                      LDACBT_EQMID_INC_CONNECTION);
+                }
+            }
+            break;
+        case DONGLE_AUDIO_CODEC_SBC:
+            enc_state->u.sbc.params.s16BitPool = controller_active ? 26 : 35;
+            SBC_Encoder_Init(&enc_state->u.sbc.params);
+            break;
+        case DONGLE_AUDIO_CODEC_AAC:
+            if (enc_state->u.aac.handle != NULL) {
+                AACENC_PARAM params = {
+                    .sampleRate = (int)enc_state->sample_rate_hz,
+                    .bitRate = controller_active ? 160000 : 256000,
+                    .nChannels = 2,
+                    .adtsUsed = VOAAC_RAWDATA,
+                };
+                (void)enc_state->u.aac.api.SetParam(
+                    enc_state->u.aac.handle, VO_PID_AAC_ENCPARAM, &params);
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+void dongle_a2dp_encoder_on_tx_congestion(void)
+{
+    if (enc_state == NULL) {
+        return;
+    }
+    if (enc_state->codec == DONGLE_AUDIO_CODEC_LDAC &&
+        enc_state->u.ldac.handle != NULL) {
+        (void)ldacBT_alter_eqmid_priority(enc_state->u.ldac.handle,
+                                          LDACBT_EQMID_INC_CONNECTION);
+    }
 }
 
 size_t dongle_a2dp_encoder_frame_samples(void)

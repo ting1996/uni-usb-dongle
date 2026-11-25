@@ -14,8 +14,14 @@
 #include <string.h>
 
 #define MIC_DEC_TASK_STACK_WORDS 4096U
-#define MIC_DEC_TASK_PRIORITY (tskIDLE_PRIORITY + 1U)
+#define MIC_DEC_TASK_PRIORITY (tskIDLE_PRIORITY + 3U)
 #define MIC_CLOSE_DEBOUNCE_MS 300U
+
+#ifdef BL616
+#define DONGLE_TCM_CODE __attribute__((section(".tcm_code")))
+#else
+#define DONGLE_TCM_CODE
+#endif
 
 #define SCO_RING_CAPACITY 16U
 #define SCO_SLOT_MAX_BYTES 64U
@@ -56,6 +62,8 @@ typedef struct {
 } sco_debug_snapshot_t;
 
 static TaskHandle_t mic_task_handle;
+static volatile bool mic_ota_suspend_req;
+static volatile bool mic_ota_suspended;
 static atomic_uint_fast8_t configured_source = DONGLE_MIC_SOURCE_AUTO;
 static atomic_bool hfp_slc_ready_state;
 static atomic_bool hfp_sco_open_state;
@@ -86,7 +94,10 @@ static bool msbc_initialized;
 static OpusDecoder *opus_dec;
 static int16_t cvsd_prev_sample;
 static uint8_t msbc_err_logs;
+#ifdef DONGLE_MIC_VERBOSE_LOG
 static uint8_t opus_ok_logs;
+static uint8_t sco_rx_nonzero_logs;
+#endif
 static uint8_t opus_err_logs;
 static uint16_t local_decoded_peak;
 
@@ -97,9 +108,8 @@ static volatile uint32_t sco_hw_tx_len;
 static volatile uint32_t sco_hw_rx_len;
 static volatile uint8_t sco_hw_last_idx;
 static volatile uint8_t sco_tx_h2_seq;
-static uint8_t sco_rx_nonzero_logs;
 
-static void fill_sco_tx_silence(uint8_t *tx_ptr, uint32_t tx_len, bool is_msbc)
+static DONGLE_TCM_CODE void fill_sco_tx_silence(uint8_t *tx_ptr, uint32_t tx_len, bool is_msbc)
 {
     static const uint8_t h2_seq[4] = { 0x08U, 0x38U, 0xC8U, 0xF8U };
 
@@ -138,7 +148,7 @@ static void write_mic_pcm(const int16_t *pcm, size_t samples)
     (void)dongle_usb_audio_mic_write((const uint8_t *)pcm, samples * sizeof(int16_t));
 }
 
-static uint8_t *sco_map_addr(uint32_t addr)
+static DONGLE_TCM_CODE uint8_t *sco_map_addr(uint32_t addr)
 {
     if (addr >= 0x28000000U) {
         return (uint8_t *)(uintptr_t)addr;
@@ -149,7 +159,7 @@ static uint8_t *sco_map_addr(uint32_t addr)
     return NULL;
 }
 
-static void sco_codec_isr(uint16_t interval_halfslot,
+static DONGLE_TCM_CODE void sco_codec_isr(uint16_t interval_halfslot,
                           uint32_t tx_buffer_0,
                           uint32_t tx_buffer_1,
                           uint32_t rx_buffer_0,
@@ -177,6 +187,7 @@ static void sco_codec_isr(uint16_t interval_halfslot,
         &sco_cb_count, 1U, memory_order_relaxed) + 1U;
     atomic_store_explicit(&sco_cb_seen, true, memory_order_release);
 
+#ifdef DONGLE_MIC_VERBOSE_LOG
     const uint8_t rem = (uint8_t)atomic_load_explicit(&sco_debug_remaining, memory_order_relaxed);
     if (rem > 0U && !atomic_load_explicit(&sco_debug_pending, memory_order_acquire)) {
         atomic_store_explicit(&sco_debug_remaining, (uint8_t)(rem - 1U), memory_order_relaxed);
@@ -198,6 +209,9 @@ static void sco_codec_isr(uint16_t interval_halfslot,
         }
         atomic_store_explicit(&sco_debug_pending, true, memory_order_release);
     }
+#else
+    (void)cb_seq;
+#endif
 
     if (interval_halfslot == 0U || buffer_index >= 2U || rx_buffer_size == 0U) {
         atomic_store_explicit(&sco_hw_active, false, memory_order_release);
@@ -416,11 +430,13 @@ static void drain_opus_ring(uint8_t active_src, bool usb_open)
     const int decoded = opus_decode(
         opus_dec, item.data, (opus_int32)item.len, opus_pcm_48k, 480, 0);
     if (decoded >= 3) {
+#ifdef DONGLE_MIC_VERBOSE_LOG
         if (opus_ok_logs < 4U) {
             ++opus_ok_logs;
             printf("[MIC] opus ok slot=%u len=%u samples=%d\r\n",
                    (unsigned)item.slot, (unsigned)item.len, decoded);
         }
+#endif
         int16_t opus_pcm_16k[160];
         size_t out_samples = (size_t)decoded / 3U;
         if (out_samples > 160U) {
@@ -454,15 +470,31 @@ static void mic_dec_task(void *unused)
     bool prev_sco_open = false;
     bool prev_usb_open = false;
     TickType_t closed_at = 0;
+#ifdef DONGLE_MIC_VERBOSE_LOG
     TickType_t last_live_log_at = 0;
+#endif
 
     for (;;) {
+        bool should_suspend = false;
+        taskENTER_CRITICAL();
+        if (mic_ota_suspend_req) {
+            mic_ota_suspended = true;
+            should_suspend = true;
+        } else {
+            mic_ota_suspended = false;
+        }
+        taskEXIT_CRITICAL();
+        if (should_suspend) {
+            vTaskSuspend(NULL);
+            continue;
+        }
         const bool hw_on = atomic_load_explicit(&sco_hw_active, memory_order_acquire);
         const bool opus_pending = prev_usb_open &&
             (atomic_load_explicit(&opus_ring_tail, memory_order_relaxed) !=
              atomic_load_explicit(&opus_ring_head, memory_order_acquire));
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(opus_pending ? 1U : (hw_on ? 2U : 20U)));
 
+#ifdef DONGLE_MIC_VERBOSE_LOG
         if (atomic_exchange_explicit(&sco_debug_pending, false, memory_order_acq_rel)) {
             printf("[MIC] sco_cb #%lu interval=%u msbc=%u tx=(%08lx,%08lx:%lu) rx=(%08lx,%08lx:%lu) idx=%u rx[0..15]=%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\r\n",
                    (unsigned long)sco_debug_snap.seq,
@@ -484,6 +516,7 @@ static void mic_dec_task(void *unused)
                    sco_debug_snap.rx_preview[12], sco_debug_snap.rx_preview[13],
                    sco_debug_snap.rx_preview[14], sco_debug_snap.rx_preview[15]);
         }
+#endif
 
         const bool usb_open_now = dongle_usb_audio_mic_open();
         if (usb_open_now != prev_usb_open) {
@@ -492,7 +525,9 @@ static void mic_dec_task(void *unused)
                 (void)opus_decoder_ctl(opus_dec, OPUS_RESET_STATE);
             }
             if (!usb_open_now) {
+#ifdef DONGLE_MIC_VERBOSE_LOG
                 opus_ok_logs = 0U;
+#endif
                 opus_err_logs = 0U;
             }
         }
@@ -512,7 +547,9 @@ static void mic_dec_task(void *unused)
             msbc_reasm_len = 0U;
             cvsd_prev_sample = 0;
             msbc_err_logs = 0U;
+#ifdef DONGLE_MIC_VERBOSE_LOG
             sco_rx_nonzero_logs = 0U;
+#endif
             if (sco_open_now) {
                 atomic_store_explicit(&sco_debug_remaining, 4U, memory_order_relaxed);
                 if (atomic_load_explicit(&hfp_codec_msbc_state, memory_order_relaxed)) {
@@ -526,8 +563,12 @@ static void mic_dec_task(void *unused)
             const uint8_t cpu_idx = (uint8_t)(((trcntl >> 31U) & 1U) ^ 1U);
             if (cpu_idx != sco_hw_last_idx) {
                 sco_hw_last_idx = cpu_idx;
+#ifdef DONGLE_MIC_VERBOSE_LOG
                 const uint32_t poll_seq = (uint32_t)atomic_fetch_add_explicit(
                     &sco_cb_count, 1U, memory_order_relaxed) + 1U;
+#else
+                (void)atomic_fetch_add_explicit(&sco_cb_count, 1U, memory_order_relaxed);
+#endif
                 const uint8_t *rx_ptr = (const uint8_t *)sco_hw_rx_buf[cpu_idx];
                 uint8_t *tx_ptr = (uint8_t *)sco_hw_tx_buf[cpu_idx];
                 const uint32_t rx_len = sco_hw_rx_len;
@@ -541,6 +582,7 @@ static void mic_dec_task(void *unused)
                     memcpy(rx_copy, rx_ptr, rx_len);
                     fill_sco_tx_silence(tx_ptr, tx_len, is_msbc);
 
+#ifdef DONGLE_MIC_VERBOSE_LOG
                     const size_t preview_n = rx_len < 16U ? rx_len : 16U;
                     bool has_nonzero = false;
                     for (size_t k = 0U; k < preview_n; ++k) {
@@ -559,6 +601,7 @@ static void mic_dec_task(void *unused)
                                p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
                                p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
                     }
+#endif
                     if (debounced) {
                         const uint8_t head = (uint8_t)atomic_load_explicit(&sco_ring_head, memory_order_relaxed);
                         const uint8_t tail = (uint8_t)atomic_load_explicit(&sco_ring_tail, memory_order_acquire);
@@ -581,6 +624,7 @@ static void mic_dec_task(void *unused)
         drain_opus_ring(active_src, usb_open_now);
 
         if (usb_open_now) {
+#ifdef DONGLE_MIC_VERBOSE_LOG
             if (last_live_log_at == 0 ||
                 (TickType_t)(now - last_live_log_at) >= pdMS_TO_TICKS(1000U)) {
                 last_live_log_at = now;
@@ -594,9 +638,14 @@ static void mic_dec_task(void *unused)
                        (unsigned)local_decoded_peak);
                 local_decoded_peak = 0U;
             }
+#else
+            local_decoded_peak = 0U;
+#endif
         } else {
+#ifdef DONGLE_MIC_VERBOSE_LOG
             last_live_log_at = 0;
             opus_ok_logs = 0U;
+#endif
             opus_err_logs = 0U;
             local_decoded_peak = 0U;
         }
@@ -626,7 +675,10 @@ void dongle_mic_pipeline_init(uint8_t saved_source)
     sco_hw_rx_len = 0U;
     sco_hw_last_idx = 0U;
     sco_tx_h2_seq = 0U;
+#ifdef DONGLE_MIC_VERBOSE_LOG
     sco_rx_nonzero_logs = 0U;
+    opus_ok_logs = 0U;
+#endif
     atomic_store_explicit(&sco_ring_head, 0U, memory_order_relaxed);
     atomic_store_explicit(&sco_ring_tail, 0U, memory_order_relaxed);
     atomic_store_explicit(&opus_ring_head, 0U, memory_order_relaxed);
@@ -634,7 +686,6 @@ void dongle_mic_pipeline_init(uint8_t saved_source)
     atomic_store_explicit(&decoded_frames, 0U, memory_order_relaxed);
     atomic_store_explicit(&error_frames, 0U, memory_order_relaxed);
     msbc_err_logs = 0U;
-    opus_ok_logs = 0U;
     opus_err_logs = 0U;
     local_decoded_peak = 0U;
 
@@ -676,6 +727,42 @@ bool dongle_mic_pipeline_set_source(uint8_t source)
         xTaskNotifyGive(mic_task_handle);
     }
     return true;
+}
+
+void dongle_mic_pipeline_set_ota_suspended(bool suspended)
+{
+    if (suspended) {
+        taskENTER_CRITICAL();
+        mic_ota_suspend_req = true;
+        taskEXIT_CRITICAL();
+        if (mic_task_handle != NULL) {
+            xTaskNotifyGive(mic_task_handle);
+        }
+        return;
+    }
+    taskENTER_CRITICAL();
+    mic_ota_suspend_req = false;
+    const bool was_parking = mic_ota_suspended;
+    taskEXIT_CRITICAL();
+    if (mic_task_handle != NULL) {
+        if (eTaskGetState(mic_task_handle) == eSuspended) {
+            vTaskResume(mic_task_handle);
+        } else if (was_parking) {
+            for (unsigned i = 0U; i < 10U && mic_ota_suspended; ++i) {
+                if (eTaskGetState(mic_task_handle) == eSuspended) {
+                    vTaskResume(mic_task_handle);
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(1U));
+            }
+        }
+    }
+}
+
+bool dongle_mic_pipeline_ota_is_suspended(void)
+{
+    return mic_task_handle == NULL ||
+           eTaskGetState(mic_task_handle) == eSuspended;
 }
 
 uint8_t dongle_mic_pipeline_get_source(void)

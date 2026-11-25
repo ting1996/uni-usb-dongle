@@ -11,6 +11,9 @@
 #include "bflb_core.h"
 #include "bl616_memorymap.h"
 #include "hardware/usb_v2_reg.h"
+#define DONGLE_TCM_CODE __attribute__((section(".tcm_code")))
+#else
+#define DONGLE_TCM_CODE
 #endif
 
 #include <string.h>
@@ -107,6 +110,8 @@ static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX
 static struct usbd_interface mgmt_interface;
 static struct usbd_interface interfaces[DONGLE_USB_GAMEPAD_COUNT];
 static TaskHandle_t gamepad_task_handle;
+static volatile bool gamepad_ota_suspend_req;
+static volatile bool gamepad_ota_suspended;
 static uint32_t submitted[DONGLE_USB_GAMEPAD_COUNT];
 static volatile uint32_t completed[DONGLE_USB_GAMEPAD_COUNT];
 
@@ -161,13 +166,18 @@ static bool fifo_is_empty(uint8_t i)
 #endif
 }
 
-static void gamepad_complete(uint8_t busid, uint8_t ep, uint32_t nbytes)
+static DONGLE_TCM_CODE void gamepad_complete(uint8_t busid, uint8_t ep, uint32_t nbytes)
 {
     (void)nbytes;
     if (busid == gamepad_bus && ep >= GAMEPAD_FIRST_EP &&
         ep < GAMEPAD_FIRST_EP + DONGLE_USB_GAMEPAD_COUNT) {
         busy[ep - GAMEPAD_FIRST_EP] = false;
         ++completed[ep - GAMEPAD_FIRST_EP];
+        if (gamepad_task_handle != NULL) {
+            BaseType_t woken = pdFALSE;
+            vTaskNotifyGiveFromISR(gamepad_task_handle, &woken);
+            portYIELD_FROM_ISR(woken);
+        }
     }
 }
 
@@ -233,7 +243,7 @@ static uint8_t active_gamepad_count(void)
     return dongle_usb_profile_gamepad_count() == 2U ? 2U : 1U;
 }
 
-static void gamepad_out_complete(uint8_t busid, uint8_t ep, uint32_t nbytes)
+static DONGLE_TCM_CODE void gamepad_out_complete(uint8_t busid, uint8_t ep, uint32_t nbytes)
 {
     if (busid != gamepad_bus || ep < GAMEPAD_FIRST_OUT_EP ||
         ep >= GAMEPAD_FIRST_OUT_EP + DONGLE_USB_GAMEPAD_COUNT) {
@@ -297,6 +307,11 @@ static void gamepad_out_complete(uint8_t busid, uint8_t ep, uint32_t nbytes)
                                rx_buffer[0], sizeof(rx_buffer[0])) != 0) {
             rx_busy[0] = false;
         }
+    }
+    if (gamepad_task_handle != NULL) {
+        BaseType_t woken = pdFALSE;
+        vTaskNotifyGiveFromISR(gamepad_task_handle, &woken);
+        portYIELD_FROM_ISR(woken);
     }
 }
 
@@ -364,6 +379,9 @@ static bool submit(uint8_t index, const uint8_t *report, size_t size,
         accepted = true;
     }
     taskEXIT_CRITICAL();
+    if (accepted && gamepad_task_handle != NULL) {
+        (void)xTaskNotifyGive(gamepad_task_handle);
+    }
     return accepted;
 }
 
@@ -390,6 +408,9 @@ bool dongle_usb_gamepad_dualsense_raw(uint8_t index, const uint8_t report[64])
         accepted = true;
     }
     taskEXIT_CRITICAL();
+    if (accepted && gamepad_task_handle != NULL) {
+        (void)xTaskNotifyGive(gamepad_task_handle);
+    }
     return accepted;
 }
 
@@ -433,6 +454,19 @@ static void gamepad_task(void *argument)
 {
     (void)argument;
     for (;;) {
+        bool should_suspend = false;
+        taskENTER_CRITICAL();
+        if (gamepad_ota_suspend_req) {
+            gamepad_ota_suspended = true;
+            should_suspend = true;
+        } else {
+            gamepad_ota_suspended = false;
+        }
+        taskEXIT_CRITICAL();
+        if (should_suspend) {
+            vTaskSuspend(NULL);
+            continue;
+        }
         taskENTER_CRITICAL();
         const TickType_t now = xTaskGetTickCount();
         const dongle_output_profile_t profile = dongle_usb_profile();
@@ -580,7 +614,7 @@ static void gamepad_task(void *argument)
             (profile == DONGLE_PROFILE_DUALSENSE &&
              ds_poll != DONGLE_DS_POLL_250HZ) ? 1U : 4U;
         taskEXIT_CRITICAL();
-        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(delay_ms));
     }
 }
 
@@ -780,5 +814,38 @@ BaseType_t dongle_usb_gamepad_register(uint8_t busid)
     }
     dongle_usb_gamepad_attach(busid);
     return xTaskCreate(gamepad_task, "usb_hid", GAMEPAD_TASK_STACK_WORDS, NULL,
-                        tskIDLE_PRIORITY + 2U, &gamepad_task_handle);
+                        tskIDLE_PRIORITY + 6U, &gamepad_task_handle);
+}
+
+void dongle_usb_gamepad_set_ota_suspended(bool suspended)
+{
+    if (suspended) {
+        taskENTER_CRITICAL();
+        gamepad_ota_suspend_req = true;
+        taskEXIT_CRITICAL();
+        return;
+    }
+    taskENTER_CRITICAL();
+    gamepad_ota_suspend_req = false;
+    const bool was_parking = gamepad_ota_suspended;
+    taskEXIT_CRITICAL();
+    if (gamepad_task_handle != NULL) {
+        if (eTaskGetState(gamepad_task_handle) == eSuspended) {
+            vTaskResume(gamepad_task_handle);
+        } else if (was_parking) {
+            for (unsigned i = 0U; i < 10U && gamepad_ota_suspended; ++i) {
+                if (eTaskGetState(gamepad_task_handle) == eSuspended) {
+                    vTaskResume(gamepad_task_handle);
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(1U));
+            }
+        }
+    }
+}
+
+bool dongle_usb_gamepad_ota_is_suspended(void)
+{
+    return gamepad_task_handle == NULL ||
+           eTaskGetState(gamepad_task_handle) == eSuspended;
 }

@@ -28,4 +28,6 @@ void dongle_usb_audio_mic_metrics(bool *open, bool *muted, uint16_t *peak, uint3
 int dongle_usb_audio_register(uint8_t busid);
 void dongle_usb_audio_attach(uint8_t busid);
 void dongle_usb_audio_event(uint8_t event);
+void dongle_usb_audio_set_ota_suspended(bool suspended);
+bool dongle_usb_audio_ota_is_suspended(void);
 #endif

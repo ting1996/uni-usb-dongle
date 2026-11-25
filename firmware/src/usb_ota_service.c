@@ -73,6 +73,8 @@ static uint8_t usb_rx_stream_data[USB_OTA_RX_STREAM_SIZE];
 static SemaphoreHandle_t usb_tx_complete;
 static StaticSemaphore_t usb_tx_complete_storage;
 static TaskHandle_t usb_ota_task_handle;
+static TaskHandle_t app_task_handle;
+static bool ota_tasks_suspended;
 static SemaphoreHandle_t device_catalog_mutex;
 static dongle_device_catalog_t *device_catalog;
 static dongle_settings_store_t *device_settings_store;
@@ -516,6 +518,55 @@ static void set_ota_indicator(bool in_progress)
 #endif
 }
 
+static void suspend_other_tasks_for_ota(void)
+{
+    if (ota_tasks_suspended) {
+        return;
+    }
+    ota_tasks_suspended = true;
+    if (app_task_handle != NULL &&
+        app_task_handle != usb_ota_task_handle &&
+        eTaskGetState(app_task_handle) != eSuspended) {
+        vTaskSuspend(app_task_handle);
+    }
+    dongle_bluetooth_set_ota_suspended(true);
+    dongle_usb_audio_set_ota_suspended(true);
+    dongle_usb_gamepad_set_ota_suspended(true);
+    dongle_mic_pipeline_set_ota_suspended(true);
+
+    const TickType_t start = xTaskGetTickCount();
+    while ((!dongle_bluetooth_ota_is_suspended() ||
+            !dongle_usb_audio_ota_is_suspended() ||
+            !dongle_usb_gamepad_ota_is_suspended() ||
+            !dongle_mic_pipeline_ota_is_suspended()) &&
+           (TickType_t)(xTaskGetTickCount() - start) < pdMS_TO_TICKS(500U)) {
+        vTaskDelay(pdMS_TO_TICKS(1U));
+    }
+    if (!dongle_bluetooth_ota_is_suspended() ||
+        !dongle_usb_audio_ota_is_suspended() ||
+        !dongle_usb_gamepad_ota_is_suspended() ||
+        !dongle_mic_pipeline_ota_is_suspended()) {
+        LOG_E("Timed out waiting for all tasks to suspend for OTA\r\n");
+    }
+}
+
+static void resume_other_tasks_after_ota(void)
+{
+    if (!ota_tasks_suspended) {
+        return;
+    }
+    ota_tasks_suspended = false;
+    dongle_mic_pipeline_set_ota_suspended(false);
+    dongle_usb_gamepad_set_ota_suspended(false);
+    dongle_usb_audio_set_ota_suspended(false);
+    dongle_bluetooth_set_ota_suspended(false);
+    if (app_task_handle != NULL &&
+        app_task_handle != usb_ota_task_handle &&
+        eTaskGetState(app_task_handle) == eSuspended) {
+        vTaskResume(app_task_handle);
+    }
+}
+
 static void abort_session(ota_session_t *session)
 {
     if (session->handle != NULL) {
@@ -525,6 +576,7 @@ static void abort_session(ota_session_t *session)
     }
     memset(session, 0, sizeof(*session));
     set_ota_indicator(false);
+    resume_other_tasks_after_ota();
 }
 
 static bool package_header_is_valid(
@@ -570,8 +622,10 @@ static dongle_usb_ota_status_t begin_update(
         return DONGLE_USB_OTA_STATUS_INVALID_IMAGE;
     }
 
+    suspend_other_tasks_for_ota();
     ota_handle_t handle = ota_start();
     if (handle == NULL) {
+        resume_other_tasks_after_ota();
         return DONGLE_USB_OTA_STATUS_UPDATE_FAILED;
     }
     if (body_size > handle->part_size ||
@@ -581,6 +635,7 @@ static dongle_usb_ota_status_t begin_update(
             LOG_E("USB OTA setup abort failed\r\n");
         }
         set_ota_indicator(false);
+        resume_other_tasks_after_ota();
         return DONGLE_USB_OTA_STATUS_INVALID_IMAGE;
     }
 
@@ -657,6 +712,7 @@ static void finish_update(
         }
         memset(session, 0, sizeof(*session));
         set_ota_indicator(false);
+        resume_other_tasks_after_ota();
         (void)send_response(frame, DONGLE_USB_OTA_STATUS_UPDATE_FAILED, 0U);
         return;
     }
@@ -677,6 +733,7 @@ static void finish_update(
             vTaskDelay(pdMS_TO_TICKS(1U));
         }
     }
+    resume_other_tasks_after_ota();
     vTaskDelay(pdMS_TO_TICKS(100U));
     bl_sys_reset_por();
     for (;;) {
@@ -1110,6 +1167,8 @@ BaseType_t dongle_usb_ota_service_start(
     if (catalog == NULL || usb_ota_task_handle != NULL) {
         return pdFAIL;
     }
+
+    app_task_handle = xTaskGetCurrentTaskHandle();
 
     device_catalog_mutex = xSemaphoreCreateMutex();
     if (device_catalog_mutex == NULL) {

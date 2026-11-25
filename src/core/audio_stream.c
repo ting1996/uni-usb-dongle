@@ -2,6 +2,12 @@
 #include <limits.h>
 #include <string.h>
 
+#ifdef BL616
+#define DONGLE_TCM_CODE __attribute__((section(".tcm_code")))
+#else
+#define DONGLE_TCM_CODE
+#endif
+
 bool dongle_audio_sbc_rtp_timestamp(uint8_t *p, size_t size, uint32_t *next_sample)
 {
     if (!p || !next_sample || size < 17 || p[0] != 0x80 || (p[1] & 0x7f) != 96 ||
@@ -70,7 +76,7 @@ dongle_audio_stream_result_t dongle_audio_stream_init(
     return DONGLE_AUDIO_STREAM_OK;
 }
 
-static void copy_into_ring(
+static DONGLE_TCM_CODE void copy_into_ring(
     uint8_t *ring,
     size_t capacity,
     uint32_t cursor,
@@ -83,7 +89,7 @@ static void copy_into_ring(
     memcpy(ring, &source[first_size], size - first_size);
 }
 
-static void copy_from_ring(
+static DONGLE_TCM_CODE void copy_from_ring(
     const uint8_t *ring,
     size_t capacity,
     uint32_t cursor,
@@ -96,7 +102,7 @@ static void copy_from_ring(
     memcpy(&destination[first_size], ring, size - first_size);
 }
 
-dongle_audio_stream_result_t dongle_audio_stream_write(
+DONGLE_TCM_CODE dongle_audio_stream_result_t dongle_audio_stream_write(
     dongle_audio_stream_t *stream,
     const uint8_t *samples,
     size_t sample_size,
@@ -134,7 +140,7 @@ dongle_audio_stream_result_t dongle_audio_stream_write(
                                : DONGLE_AUDIO_STREAM_PARTIAL;
 }
 
-dongle_audio_stream_result_t dongle_audio_stream_read(
+DONGLE_TCM_CODE dongle_audio_stream_result_t dongle_audio_stream_read(
     dongle_audio_stream_t *stream,
     uint8_t *samples,
     size_t sample_capacity,

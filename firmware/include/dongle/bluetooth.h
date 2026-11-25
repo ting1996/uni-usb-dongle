@@ -36,4 +36,6 @@ int dongle_bluetooth_send_a2dp_media(const uint8_t *pdu, size_t len);
 void dongle_bluetooth_set_audio_codec(uint8_t codec);
 void dongle_bluetooth_set_usb_sample_rate(uint32_t sample_rate_hz);
 uint8_t dongle_bluetooth_active_audio_codec(void);
+void dongle_bluetooth_set_ota_suspended(bool suspended);
+bool dongle_bluetooth_ota_is_suspended(void);
 #endif

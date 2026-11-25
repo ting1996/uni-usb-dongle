@@ -6,7 +6,8 @@ sdk_add_include_directories(. ../include include)
 sdk_add_compile_definitions(CONFIG_FAST_OTA=0)
 sdk_add_compile_definitions(CONFIG_DONGLE_USB_AUDIO=1)
 sdk_add_compile_definitions(CONFIG_BT_RX_BUF_COUNT=8)
-sdk_add_compile_definitions(CONFIG_BT_L2CAP_TX_BUF_COUNT=8)
+sdk_add_compile_definitions(CONFIG_BT_L2CAP_TX_BUF_COUNT=12)
+sdk_add_compile_definitions(CONFIG_BT_L2CAP_TX_MTU=1008)
 option(DONGLE_BT_SIGNAL_TRACE "Trace bounded headphone L2CAP signaling during negotiation" OFF)
 sdk_add_link_options("-Wl,--wrap=bt_l2cap_chan_send")
 sdk_add_link_options("-Wl,--wrap=bt_hci_cmd_send_sync")
@@ -65,8 +66,8 @@ set(THIRD_PARTY_CODEC_SOURCES
     ${VO_AACENC_SOURCES}
 )
 set_source_files_properties(${THIRD_PARTY_CODEC_SOURCES} PROPERTIES
-    COMPILE_DEFINITIONS "__unused="
-    COMPILE_OPTIONS "-Wno-unused-parameter;-Wno-sign-compare;-Wno-unused-variable;-Wno-unused-but-set-variable;-Wno-implicit-fallthrough;-Wno-maybe-uninitialized"
+    COMPILE_DEFINITIONS "__unused=;_32BIT_FIXED_POINT=1"
+    COMPILE_OPTIONS "-O2;-Wno-unused-parameter;-Wno-sign-compare;-Wno-unused-variable;-Wno-unused-but-set-variable;-Wno-implicit-fallthrough;-Wno-maybe-uninitialized"
 )
 target_sources(app PRIVATE
     ../src/core/a2dp_packetizer.c

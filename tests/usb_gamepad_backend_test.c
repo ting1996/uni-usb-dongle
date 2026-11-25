@@ -123,14 +123,54 @@ static unsigned interface_count;
 static unsigned in_ep_count;
 static unsigned out_ep_count;
 static bool reject_write;
+static eTaskState gamepad_task_state = eRunning;
 
 TickType_t xTaskGetTickCount(void) { return clock_ticks; }
 void vTaskDelay(TickType_t ticks) { (void)ticks; longjmp(task_yield, 1); }
+uint32_t ulTaskNotifyTake(BaseType_t xClearCountOnExit, TickType_t xTicksToWait)
+{
+    (void)xClearCountOnExit;
+    (void)xTicksToWait;
+    longjmp(task_yield, 1);
+}
+BaseType_t xTaskNotifyGive(TaskHandle_t xTaskToNotify)
+{
+    (void)xTaskToNotify;
+    return pdPASS;
+}
+void vTaskNotifyGiveFromISR(TaskHandle_t xTaskToNotify,
+                            BaseType_t *pxHigherPriorityTaskWoken)
+{
+    (void)xTaskToNotify;
+    if (pxHigherPriorityTaskWoken != NULL) {
+        *pxHigherPriorityTaskWoken = pdFALSE;
+    }
+}
+void vTaskSuspend(TaskHandle_t task)
+{
+    if (task == NULL || task == &clock_ticks) {
+        gamepad_task_state = eSuspended;
+        if (task == NULL) {
+            longjmp(task_yield, 1);
+        }
+    }
+}
+void vTaskResume(TaskHandle_t task)
+{
+    if (task == &clock_ticks) {
+        gamepad_task_state = eRunning;
+    }
+}
+eTaskState eTaskGetState(TaskHandle_t task)
+{
+    return task == &clock_ticks ? gamepad_task_state : eInvalid;
+}
 BaseType_t xTaskCreate(void (*entry)(void *), const char *name, unsigned stack,
                        void *arg, unsigned priority, TaskHandle_t *handle)
 {
     (void)entry; (void)name; (void)stack; (void)arg; (void)priority;
     *handle = &clock_ticks;
+    gamepad_task_state = eRunning;
     return pdPASS;
 }
 void usbd_add_interface(uint8_t bus, struct usbd_interface *intf)
@@ -560,6 +600,21 @@ int main(void)
         complete_both();
     }
     CHECK(sends[0] - ds750_start == 750U);
+
+    /* OTA suspension parks gamepad_task until explicitly resumed. */
+    const unsigned pre_ota_sends = sends[0];
+    dongle_usb_gamepad_set_ota_suspended(true);
+    poll_at(3005);
+    CHECK(dongle_usb_gamepad_ota_is_suspended());
+    CHECK(sends[0] == pre_ota_sends);
+    CHECK(dongle_usb_gamepad_sink(NULL, 0, input, 9));
+    poll_at(3010);
+    CHECK(sends[0] == pre_ota_sends);
+    dongle_usb_gamepad_set_ota_suspended(false);
+    CHECK(!dongle_usb_gamepad_ota_is_suspended());
+    poll_at(3015);
+    CHECK(sends[0] == pre_ota_sends + 1U);
+    complete_both();
 
     puts("USB gamepad backend tests passed");
     return 0;

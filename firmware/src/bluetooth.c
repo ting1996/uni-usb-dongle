@@ -150,6 +150,9 @@ static volatile uint8_t found_count, scan_active, last_error;
 static volatile bool ready;
 static SemaphoreHandle_t ready_signal;
 static QueueHandle_t operations;
+static TaskHandle_t radio_task_handle;
+static volatile bool radio_ota_suspend_req;
+static volatile bool radio_ota_suspended;
 static dongle_device_catalog_t *catalog;
 static dongle_settings_store_t *store;
 static SemaphoreHandle_t catalog_lock;
@@ -166,9 +169,7 @@ static volatile uint16_t media_capture_size;
 static volatile bool media_capture_armed;
 static uint8_t local_address[6];
 static volatile bool avrcp_connected;
-static volatile uint8_t avrcp_volume = 0x50U;
-struct net_buf_pool a2dp_tx_pool;
-struct net_buf_pool a2dp_rx_pool;
+static volatile uint8_t avrcp_volume = 0x7FU;
 extern int __real_bt_hci_cmd_send_sync(u16_t opcode, struct net_buf *buf, struct net_buf **rsp);
 int __wrap_bt_hci_cmd_send_sync(u16_t opcode, struct net_buf *buf, struct net_buf **rsp)
 {
@@ -616,6 +617,7 @@ static int receive_input(struct bt_l2cap_chan *chan, struct net_buf *buf)
         size_t opus_len = 0U;
         if (p->slot < 2U && dongle_dualsense_bt_extract_mic_opus(
                 buf->data + 1U, buf->len - 1U, &opus_ptr, &opus_len)) {
+#ifdef DONGLE_BT_SIGNAL_TRACE
             if (ds_mic_pkt_logs < 4U) {
                 ++ds_mic_pkt_logs;
                 printf("[RADIO] DS mic opus slot=%u len=%u hdr=%02x%02x%02x\r\n",
@@ -624,6 +626,7 @@ static int receive_input(struct bt_l2cap_chan *chan, struct net_buf *buf)
                        opus_len > 1U ? opus_ptr[1] : 0U,
                        opus_len > 2U ? opus_ptr[2] : 0U);
             }
+#endif
             dongle_mic_pipeline_feed_dualsense_opus(p->slot, opus_ptr, opus_len);
         } else if (dongle_dualsense_input(buf->data + 1, buf->len - 1, report)) {
             if (p->slot < 2U) {
@@ -654,6 +657,7 @@ static int receive_input(struct bt_l2cap_chan *chan, struct net_buf *buf)
 }
 static void control_connected(struct bt_l2cap_chan *chan)
 { peer_t *p = channel_peer(chan); if (p) { p->control_open = true; p->profile_pending = true; printf("[RADIO] controller control connected\r\n"); } }
+static void a2dp_on_controller_coex_changed(void);
 static void input_connected(struct bt_l2cap_chan *chan)
 {
     peer_t *p = channel_peer(chan);
@@ -661,6 +665,7 @@ static void input_connected(struct bt_l2cap_chan *chan)
         p->interrupt_open = true;
         p->profile_pending = true;
         dongle_mic_pipeline_set_ds_connected(dongle_bluetooth_connected());
+        a2dp_on_controller_coex_changed();
         printf("[RADIO] controller input connected\r\n");
     }
 }
@@ -672,6 +677,7 @@ static void channel_disconnected(struct bt_l2cap_chan *chan)
     else {
         p->interrupt_open = false;
         dongle_mic_pipeline_set_ds_connected(dongle_bluetooth_connected());
+        a2dp_on_controller_coex_changed();
     }
     const uint8_t neutral[9] = {128,128,128,128,0,0,0,0,8};
     if (p->slot < 2) {
@@ -795,6 +801,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     if (!p->role && p->slot < 2) {
         ds_out_last_len[p->slot] = 0;
         dongle_mic_pipeline_set_ds_connected(dongle_bluetooth_connected());
+        a2dp_on_controller_coex_changed();
     }
     p->retry_at = xTaskGetTickCount() + pdMS_TO_TICKS(3000);
     /* The SDK still owns the L2CAP channel list during this callback. Do not
@@ -918,6 +925,7 @@ static dongle_a2dp_source_t a2dp_src;
 static struct bt_l2cap_br_chan a2dp_sig_chan;
 static struct bt_l2cap_br_chan a2dp_media_chan;
 static struct bt_conn *a2dp_acl_conn;
+static const struct bt_l2cap_chan_ops a2dp_media_ops;
 static volatile bool a2dp_sig_open, a2dp_media_open, a2dp_reconfig_pending;
 static volatile uint8_t a2dp_preferred_codec = DONGLE_AUDIO_CODEC_AUTO;
 static volatile uint32_t a2dp_usb_sample_rate_hz = 44100U;
@@ -925,10 +933,33 @@ static volatile uint8_t a2dp_active_codec = 0xFFU;
 static volatile uint32_t a2dp_bt_sample_rate_hz = 44100U;
 static volatile uint16_t a2dp_media_mtu = 672U;
 
+static dongle_audio_codec_t effective_a2dp_codec(void)
+{
+    if (a2dp_preferred_codec == DONGLE_AUDIO_CODEC_AUTO &&
+        dongle_bluetooth_connected() != 0U) {
+        return DONGLE_AUDIO_CODEC_SBC;
+    }
+    return (dongle_audio_codec_t)a2dp_preferred_codec;
+}
+
+static void a2dp_on_controller_coex_changed(void)
+{
+    if (a2dp_preferred_codec != DONGLE_AUDIO_CODEC_AUTO || !a2dp_sig_open) {
+        return;
+    }
+    if (dongle_bluetooth_connected() != 0U) {
+        if (a2dp_active_codec != DONGLE_AUDIO_CODEC_SBC) {
+            a2dp_reconfig_pending = true;
+        }
+    } else if (a2dp_active_codec == DONGLE_AUDIO_CODEC_SBC) {
+        a2dp_reconfig_pending = true;
+    }
+}
+
 static struct net_buf *a2dp_alloc_rx(struct bt_l2cap_chan *chan)
 {
     (void)chan;
-    return net_buf_alloc(&a2dp_rx_pool, K_NO_WAIT);
+    return net_buf_alloc(&hid_rx_pool, K_NO_WAIT);
 }
 
 static int a2dp_send_l2cap(struct bt_l2cap_br_chan *ch, const uint8_t *data, size_t len)
@@ -936,7 +967,7 @@ static int a2dp_send_l2cap(struct bt_l2cap_br_chan *ch, const uint8_t *data, siz
     if (!ch->chan.conn || len > 1008U) {
         return -EINVAL;
     }
-    struct net_buf *buf = net_buf_alloc(&a2dp_tx_pool, K_NO_WAIT);
+    struct net_buf *buf = net_buf_alloc(&hid_tx_pool, K_NO_WAIT);
     if (!buf) {
         return -ENOMEM;
     }
@@ -967,6 +998,8 @@ static int a2dp_open_media_cb(void *user)
     if (a2dp_media_open) {
         return dongle_a2dp_source_media_connected(&a2dp_src);
     }
+    memset(&a2dp_media_chan, 0, sizeof(a2dp_media_chan));
+    a2dp_media_chan.chan.ops = &a2dp_media_ops;
     a2dp_media_chan.rx.mtu = 1008U;
     return bt_l2cap_chan_connect(a2dp_acl_conn, &a2dp_media_chan.chan, 0x0019U);
 }
@@ -1026,14 +1059,12 @@ static void a2dp_sig_connected(struct bt_l2cap_chan *chan)
         p->audio_connected = true;
         audio_state = 3;
         audio_error = audio_error_stage = 0;
-        if (!p->audio_start_requested) {
+        if (!p->audio_start_requested && p->outgoing) {
             p->audio_start_requested = true;
             dongle_a2dp_source_set_preferences(
-                &a2dp_src, (dongle_audio_codec_t)a2dp_preferred_codec,
+                &a2dp_src, effective_a2dp_codec(),
                 a2dp_usb_sample_rate_hz);
-            if (p->outgoing) {
-                (void)dongle_a2dp_source_connect(&a2dp_src, true);
-            }
+            (void)dongle_a2dp_source_connect(&a2dp_src, true);
         }
     }
     printf("[RADIO] AVDTP signaling connected\r\n");
@@ -1067,9 +1098,12 @@ static int a2dp_sig_recv(struct bt_l2cap_chan *chan, struct net_buf *buf)
 
 static void a2dp_media_connected(struct bt_l2cap_chan *chan)
 {
-    (void)chan;
+    peer_t *p = find_peer(chan ? chan->conn : NULL);
     a2dp_media_open = true;
     (void)dongle_a2dp_source_media_connected(&a2dp_src);
+    if (p && p->role && a2dp_src.state == DONGLE_A2DP_STATE_OPEN) {
+        p->audio_start_requested = false;
+    }
     printf("[RADIO] AVDTP media connected mtu=%u\r\n", a2dp_media_chan.tx.mtu);
 }
 
@@ -1252,6 +1286,16 @@ static int request_central(const bt_addr_t *address)
      * updates connection->role, which manage_role() polls. */
     return bt_hci_cmd_send_sync(DONGLE_HCI_OP_SWITCH_ROLE, buf, NULL);
 }
+static int disable_default_link_policy(void)
+{
+    struct net_buf *buf = bt_hci_cmd_create(
+        BT_HCI_OP_WRITE_DEFAULT_LINK_POLICY,
+        sizeof(struct bt_hci_cp_write_default_link_policy));
+    if (!buf) return -ENOBUFS;
+    struct bt_hci_cp_write_default_link_policy *cp = net_buf_add(buf, sizeof(*cp));
+    cp->link_policy = sys_cpu_to_le16(0);
+    return bt_hci_cmd_send_sync(BT_HCI_OP_WRITE_DEFAULT_LINK_POLICY, buf, NULL);
+}
 static int keep_central(struct bt_conn *connection)
 {
     struct net_buf *buf = bt_hci_cmd_create(BT_HCI_OP_WRITE_LINK_POLICY,
@@ -1262,6 +1306,41 @@ static int keep_central(struct bt_conn *connection)
     /* Keep ACL links central and active to prevent scatternet and sniff stalls. */
     cp->link_policy = sys_cpu_to_le16(0);
     return bt_hci_cmd_send_sync(BT_HCI_OP_WRITE_LINK_POLICY, buf, NULL);
+}
+#define DONGLE_HCI_OP_CHANGE_CONN_PKT_TYPE BT_OP(BT_OGF_LINK_CTRL, 0x000f)
+struct dongle_hci_cp_change_conn_pkt_type {
+    uint16_t handle;
+    uint16_t pkt_type;
+} __packed;
+static int configure_packet_type(struct bt_conn *connection, bool is_audio)
+{
+    struct net_buf *buf = bt_hci_cmd_create(
+        DONGLE_HCI_OP_CHANGE_CONN_PKT_TYPE,
+        sizeof(struct dongle_hci_cp_change_conn_pkt_type));
+    if (!buf) return -ENOBUFS;
+    struct dongle_hci_cp_change_conn_pkt_type *cp = net_buf_add(buf, sizeof(*cp));
+    cp->handle = sys_cpu_to_le16(connection->handle);
+    /* Audio: allow 2-DH5/3-DH5 (0xCC18). Controller: cap at 3-slot (0x3C18) so
+     * HID packets do not hog 5-slot TDM windows alongside A2DP. */
+    cp->pkt_type = sys_cpu_to_le16(is_audio ? 0xCC18U : 0x3C18U);
+    return bt_hci_cmd_send_sync(DONGLE_HCI_OP_CHANGE_CONN_PKT_TYPE, buf, NULL);
+}
+#define DONGLE_HCI_OP_WRITE_LINK_SUPERVISION_TIMEOUT BT_OP(BT_OGF_BASEBAND, 0x0037)
+struct dongle_hci_cp_write_supervision_timeout {
+    uint16_t handle;
+    uint16_t timeout;
+} __packed;
+static int configure_supervision_timeout(struct bt_conn *connection, bool is_audio)
+{
+    struct net_buf *buf = bt_hci_cmd_create(
+        DONGLE_HCI_OP_WRITE_LINK_SUPERVISION_TIMEOUT,
+        sizeof(struct dongle_hci_cp_write_supervision_timeout));
+    if (!buf) return -ENOBUFS;
+    struct dongle_hci_cp_write_supervision_timeout *cp = net_buf_add(buf, sizeof(*cp));
+    cp->handle = sys_cpu_to_le16(connection->handle);
+    /* Slots (0.625 ms): 9600 = 6.0 s for audio, 6400 = 4.0 s for controller. */
+    cp->timeout = sys_cpu_to_le16(is_audio ? 9600U : 6400U);
+    return bt_hci_cmd_send_sync(DONGLE_HCI_OP_WRITE_LINK_SUPERVISION_TIMEOUT, buf, NULL);
 }
 #define DONGLE_HCI_OP_QOS_SETUP BT_OP(BT_OGF_LINK_POLICY, 0x0007)
 struct dongle_hci_cp_qos_setup {
@@ -1290,7 +1369,7 @@ static int configure_qos(struct bt_conn *connection, bool is_audio)
         cp->service_type = 0x01U; /* Best Effort */
         cp->token_rate = 0U;
         cp->peak_bandwidth = 0U;
-        cp->latency = sys_cpu_to_le32(10000U);
+        cp->latency = sys_cpu_to_le32(8000U);
     }
     cp->delay_variation = sys_cpu_to_le32(0xffffffffU);
     return bt_hci_cmd_send_sync(DONGLE_HCI_OP_QOS_SETUP, buf, NULL);
@@ -1301,9 +1380,13 @@ static void manage_role(peer_t *p, struct bt_conn *connection)
     if (!p->role_stage) return;
     if (connection->role == BT_HCI_ROLE_MASTER) {
         p->role_stage = 0;
+        const bool is_audio = p->role != 0U;
         int err = keep_central(connection);
-        int qos_err = configure_qos(connection, p->role != 0U);
-        printf("[RADIO] central link role=%u policy=%d qos=%d\r\n", p->role, err, qos_err);
+        int qos_err = configure_qos(connection, is_audio);
+        int pkt_err = configure_packet_type(connection, is_audio);
+        int lsto_err = configure_supervision_timeout(connection, is_audio);
+        printf("[RADIO] central link role=%u policy=%d qos=%d pkt=%d lsto=%d\r\n",
+               p->role, err, qos_err, pkt_err, lsto_err);
         return;
     }
     const TickType_t now = xTaskGetTickCount();
@@ -1354,6 +1437,19 @@ static void radio_task(void *unused)
     operation_t op;
     bool usb_was_open = false;
     for (;;) {
+        bool should_suspend = false;
+        taskENTER_CRITICAL();
+        if (radio_ota_suspend_req) {
+            radio_ota_suspended = true;
+            should_suspend = true;
+        } else {
+            radio_ota_suspended = false;
+        }
+        taskEXIT_CRITICAL();
+        if (should_suspend) {
+            vTaskSuspend(NULL);
+            continue;
+        }
         bool usb_open = dongle_usb_audio_playback_open();
         if (usb_open && !usb_was_open) for (unsigned i = 0; i < PEERS; ++i)
             if (peers[i].role) peers[i].audio_start_requested = false;
@@ -1418,7 +1514,7 @@ static void radio_task(void *unused)
             if (p->role && p->authenticated && a2dp_reconfig_pending && a2dp_sig_open) {
                 a2dp_reconfig_pending = false;
                 (void)dongle_a2dp_source_reconfigure(
-                    &a2dp_src, (dongle_audio_codec_t)a2dp_preferred_codec,
+                    &a2dp_src, effective_a2dp_codec(),
                     a2dp_usb_sample_rate_hz);
             }
             if (p->role && p->authenticated && p->audio_connected && !p->audio_start_requested &&
@@ -1430,7 +1526,7 @@ static void radio_task(void *unused)
                 if (a2dp_sig_open && a2dp_src.state == DONGLE_A2DP_STATE_IDLE) {
                     p->audio_start_requested = true;
                     dongle_a2dp_source_set_preferences(
-                        &a2dp_src, (dongle_audio_codec_t)a2dp_preferred_codec,
+                        &a2dp_src, effective_a2dp_codec(),
                         a2dp_usb_sample_rate_hz);
                     (void)dongle_a2dp_source_connect(&a2dp_src, true);
                 } else if (a2dp_media_open && a2dp_src.state == DONGLE_A2DP_STATE_OPEN) {
@@ -2322,6 +2418,37 @@ size_t dongle_bluetooth_command(uint8_t command, const uint8_t *data, size_t siz
     }
     response[0] = 1; return 1;
 }
+void dongle_bluetooth_set_ota_suspended(bool suspended)
+{
+    if (suspended) {
+        taskENTER_CRITICAL();
+        radio_ota_suspend_req = true;
+        taskEXIT_CRITICAL();
+        return;
+    }
+    taskENTER_CRITICAL();
+    radio_ota_suspend_req = false;
+    const bool was_parking = radio_ota_suspended;
+    taskEXIT_CRITICAL();
+    if (radio_task_handle != NULL) {
+        if (eTaskGetState(radio_task_handle) == eSuspended) {
+            vTaskResume(radio_task_handle);
+        } else if (was_parking) {
+            for (unsigned i = 0U; i < 10U && radio_ota_suspended; ++i) {
+                if (eTaskGetState(radio_task_handle) == eSuspended) {
+                    vTaskResume(radio_task_handle);
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(1U));
+            }
+        }
+    }
+}
+bool dongle_bluetooth_ota_is_suspended(void)
+{
+    return radio_task_handle == NULL ||
+           eTaskGetState(radio_task_handle) == eSuspended;
+}
 int dongle_bluetooth_start(dongle_device_catalog_t *devices, dongle_settings_store_t *settings, SemaphoreHandle_t mutex)
 {
     catalog = devices; store = settings; catalog_lock = mutex;
@@ -2332,10 +2459,8 @@ int dongle_bluetooth_start(dongle_device_catalog_t *devices, dongle_settings_sto
     ready_signal = xSemaphoreCreateBinary(); operations = xQueueCreate(4, sizeof(operation_t));
     if (!ready_signal || !operations) return -ENOMEM;
     if (rfparam_init(0, NULL, 0)) return -EIO;
-    net_buf_init(&hid_tx_pool, 12, BT_L2CAP_BUF_SIZE(HID_MTU), NULL);
-    net_buf_init(&hid_rx_pool, 10, BT_L2CAP_BUF_SIZE(HID_MTU), NULL);
-    net_buf_init(&a2dp_tx_pool, 6, BT_L2CAP_BUF_SIZE(1024), NULL);
-    net_buf_init(&a2dp_rx_pool, 4, BT_L2CAP_BUF_SIZE(1024), NULL);
+    net_buf_init(&hid_tx_pool, 18, BT_L2CAP_BUF_SIZE(1024), NULL);
+    net_buf_init(&hid_rx_pool, 14, BT_L2CAP_BUF_SIZE(1024), NULL);
     const dongle_a2dp_source_callbacks_t a2dp_cb = {
         .send_signal = a2dp_sig_send_cb,
         .open_media = a2dp_open_media_cb,
@@ -2350,6 +2475,7 @@ int dongle_bluetooth_start(dongle_device_catalog_t *devices, dongle_settings_sto
     int err = bt_enable(enabled);
     if (err) return err;
     if (xSemaphoreTake(ready_signal, pdMS_TO_TICKS(15000)) != pdTRUE || !ready) return -ETIMEDOUT;
+    (void)disable_default_link_policy();
     bt_addr_le_t local; bt_get_local_public_address(&local);
     uint8_t zero[6] = {0};
     if (!memcmp(local.a.val, zero, 6)) {
@@ -2392,6 +2518,6 @@ int dongle_bluetooth_start(dongle_device_catalog_t *devices, dongle_settings_sto
             }
         }
     }
-    if (xTaskCreate(radio_task, "radio", 2048, NULL, 4, NULL) != pdPASS) { ready = false; return -ENOMEM; }
+    if (xTaskCreate(radio_task, "radio", 2048, NULL, 5, &radio_task_handle) != pdPASS) { ready = false; return -ENOMEM; }
     return 0;
 }

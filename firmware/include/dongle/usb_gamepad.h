@@ -48,4 +48,7 @@ bool dongle_usb_gamepad_test(uint8_t gamepad_index, const uint8_t *report,
 #define DONGLE_USB_GAMEPAD_DIAGNOSTIC_SIZE 26U
 bool dongle_usb_gamepad_diagnostics(uint8_t gamepad_index, uint8_t *payload);
 
+void dongle_usb_gamepad_set_ota_suspended(bool suspended);
+bool dongle_usb_gamepad_ota_is_suspended(void);
+
 #endif

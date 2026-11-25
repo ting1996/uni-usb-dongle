@@ -18,6 +18,10 @@ int dongle_a2dp_encoder_open(dongle_audio_codec_t codec,
 
 void dongle_a2dp_encoder_close(void);
 
+void dongle_a2dp_encoder_set_controller_active(bool controller_active);
+
+void dongle_a2dp_encoder_on_tx_congestion(void);
+
 /* Number of stereo PCM frames expected per dongle_a2dp_encoder_encode() call. */
 size_t dongle_a2dp_encoder_frame_samples(void);
 

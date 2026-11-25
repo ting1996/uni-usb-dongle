@@ -16,5 +16,7 @@ bool dongle_mic_pipeline_desired_hfp_sco(void);
 int8_t dongle_mic_pipeline_desired_ds_slot(void);
 void dongle_mic_pipeline_feed_dualsense_opus(uint8_t slot, const uint8_t *opus, size_t len);
 size_t dongle_mic_pipeline_metrics(uint8_t out[DONGLE_MIC_STATE_PAYLOAD_SIZE]);
+void dongle_mic_pipeline_set_ota_suspended(bool suspended);
+bool dongle_mic_pipeline_ota_is_suspended(void);
 
 #endif
