@@ -36,20 +36,42 @@ runs:
       id: cache-toolchain
       uses: actions/cache@v4
       with:
-        path: ~/toolchain_gcc_t-head_linux
-        key: thead-toolchain-linux-v1
+        path: ~/toolchains/xuantie-v2.10.2
+        key: xuantie-gcc-riscv-v2.10.2-linux-x86_64-v1
 
-    - name: Clone T-Head RISC-V toolchain
+    - name: Download T-Head RISC-V toolchain
       if: steps.cache-toolchain.outputs.cache-hit != 'true'
       shell: bash
       run: |
-        git clone --depth 1 https://github.com/bouffalolab/toolchain_gcc_t-head_linux.git "$HOME/toolchain_gcc_t-head_linux"
+        set -euo pipefail
+        TOOLCHAIN_URL="https://github.com/bouffalolab/toolchain/releases/download/compact-old/xuantie-gcc-riscv-v2.10.2-linux-x86_64.tar.xz"
+        TOOLCHAIN_SHA256="a3a6fd5fe9fce64c09fb6d96cb1075ba114ee466d73bba6be5a4462fee978c83"
+        TOOLCHAIN_DIR="$HOME/toolchains/xuantie-v2.10.2"
+        ARCHIVE="/tmp/xuantie-gcc-riscv-v2.10.2-linux-x86_64.tar.xz"
 
-    - name: Ensure tool permissions
+        curl -fsSL -o "${ARCHIVE}" "${TOOLCHAIN_URL}"
+        echo "${TOOLCHAIN_SHA256}  ${ARCHIVE}" | sha256sum -c -
+        rm -rf "${TOOLCHAIN_DIR}"
+        mkdir -p "${TOOLCHAIN_DIR}"
+        tar -xJf "${ARCHIVE}" -C "${TOOLCHAIN_DIR}"
+        rm -f "${ARCHIVE}"
+
+    - name: Locate toolchain and ensure permissions
       shell: bash
       run: |
+        set -euo pipefail
         SDK_BASE="${{ github.workspace }}/third_party/bouffalo_sdk"
-        chmod -R +x "$HOME/toolchain_gcc_t-head_linux/bin"
+        TOOLCHAIN_DIR="$HOME/toolchains/xuantie-v2.10.2"
+        GCC_PATH="$(find "${TOOLCHAIN_DIR}" -type f -name 'riscv64-unknown-elf-gcc' | head -n 1 || true)"
+        if [ -z "${GCC_PATH}" ]; then
+          echo "Error: riscv64-unknown-elf-gcc not found under ${TOOLCHAIN_DIR}" >&2
+          exit 1
+        fi
+        TOOLCHAIN_BIN="$(dirname "${GCC_PATH}")"
+        chmod -R +x "${TOOLCHAIN_BIN}"
+        "${TOOLCHAIN_BIN}/riscv64-unknown-elf-gcc" --version
+        echo "TOOLCHAIN_BIN=${TOOLCHAIN_BIN}" >> "${GITHUB_ENV}"
+
         if [ -d "${SDK_BASE}/tools/cmake/bin" ]; then
           chmod -R +x "${SDK_BASE}/tools/cmake/bin"
         fi
@@ -61,11 +83,11 @@ runs:
       shell: bash
       run: |
         SDK_BASE="${{ github.workspace }}/third_party/bouffalo_sdk"
-        export PATH="$HOME/toolchain_gcc_t-head_linux/bin:$PATH"
+        export PATH="${TOOLCHAIN_BIN}:$PATH"
         make -C firmware \
           BOARD="${{ inputs.board }}" \
           BL_SDK_BASE="${SDK_BASE}" \
-          CROSS_COMPILE="$HOME/toolchain_gcc_t-head_linux/bin/riscv64-unknown-elf-"
+          CROSS_COMPILE="${TOOLCHAIN_BIN}/riscv64-unknown-elf-"
 
     - name: Verify slot 0 size and package artifacts
       shell: bash

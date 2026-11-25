@@ -40,7 +40,7 @@ class UsbGamepadCheckTests(unittest.TestCase):
 
     def test_selects_usb_parent_of_the_requested_serial_port(self):
         with tempfile.TemporaryDirectory() as root:
-            root = Path(root)
+            root = Path(root).resolve()
             device = root / "usb1" / "1-2"
             intf_name = "1-2_1.0" if os.name == "nt" else "1-2:1.0"
             intf = device / intf_name

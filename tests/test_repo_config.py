@@ -155,6 +155,18 @@ class RepoConfigTests(unittest.TestCase):
                 f"legacy SDK location must not be referenced: {forbidden}",
             )
 
+    def test_build_firmware_action_uses_bouffalo_toolchain_release(self):
+        content = _read(".github/actions/build-firmware/action.yml")
+        self.assertNotIn("bouffalolab/toolchain_gcc_t-head_linux", content)
+        self.assertIn(
+            "https://github.com/bouffalolab/toolchain/releases/download/compact-old/xuantie-gcc-riscv-v2.10.2-linux-x86_64.tar.xz",
+            content,
+        )
+        self.assertIn(
+            "a3a6fd5fe9fce64c09fb6d96cb1075ba114ee466d73bba6be5a4462fee978c83",
+            content,
+        )
+
     def test_graphifyignore_excludes_third_party(self):
         content = _read(".graphifyignore")
         non_comment = [
