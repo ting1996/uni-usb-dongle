@@ -32,6 +32,8 @@ bool dongle_audio_format_is_supported(const dongle_audio_format_t *format)
         case 32000U:
         case 44100U:
         case 48000U:
+        case 88200U:
+        case 96000U:
             return true;
         default:
             return false;

@@ -23,7 +23,13 @@ test("buildWebPages stages static GitHub Pages bundle with .js modules and .noje
     const indexHtml = fs.readFileSync(path.join(outDir, "index.html"), "utf8");
     assert.match(indexHtml, /href="\.\/styles\.css"/);
     assert.match(indexHtml, /src="\.\/app\.js"/);
+    assert.match(indexHtml, /data-theme="black"/);
+    assert.match(indexHtml, /id="themeToggleBtn"/);
     assert.doesNotMatch(indexHtml, /\.mjs/);
+
+    const stylesCss = fs.readFileSync(path.join(outDir, "styles.css"), "utf8");
+    assert.match(stylesCss, /:root\[data-theme="black"\]/);
+    assert.match(stylesCss, /--bg:\s*#000000/);
 
     const appJs = fs.readFileSync(path.join(outDir, "app.js"), "utf8");
     assert.match(appJs, /from "\.\/protocol\.js"/);

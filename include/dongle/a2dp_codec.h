@@ -1,0 +1,18 @@
+#ifndef DONGLE_A2DP_CODEC_H
+#define DONGLE_A2DP_CODEC_H
+
+#include <stdint.h>
+
+typedef enum {
+    DONGLE_AUDIO_CODEC_AUTO = 0,
+    DONGLE_AUDIO_CODEC_SBC = 1,
+    DONGLE_AUDIO_CODEC_AAC = 2,
+    DONGLE_AUDIO_CODEC_LDAC = 3,
+    DONGLE_AUDIO_CODEC_APTX = 4,
+    DONGLE_AUDIO_CODEC_APTX_HD = 5,
+    DONGLE_AUDIO_CODEC_COUNT = 6
+} dongle_audio_codec_t;
+
+#define DONGLE_AUDIO_CODEC_MASK 0x3FU
+
+#endif

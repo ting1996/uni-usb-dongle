@@ -76,10 +76,12 @@ class HidCheckTests(unittest.TestCase):
         idle_payload = bytes([0, 1, 0, 0, 0x0F, 0, 0xFF, 0x0F, 0, 0, 0, 0])
         self.assertIsNone(usb_hid_check.decode_profile_state(idle_payload)["streaming"])
 
-        ds_payload = bytes([0, 1, 4, 4, 0x1F, 1, 1, 0x03, 0, 0, 0, 0])
+        ds_payload = bytes([0, 1, 4, 4, 0x1F, 3, 3, 0x3F, 0, 0, 0, 0])
         ds_decoded = usb_hid_check.decode_profile_state(ds_payload)
         self.assertEqual(ds_decoded["active"], 4)
         self.assertEqual(ds_decoded["active_name"], "dualsense")
+        self.assertEqual(ds_decoded["codec_name"], "ldac")
+        self.assertEqual(ds_decoded["codec_mask"], 0x3F)
         self.assertEqual(ds_decoded["profile_mask"], 0x1F)
 
         with self.assertRaises(ValueError):

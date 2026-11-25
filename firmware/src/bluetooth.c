@@ -1,4 +1,6 @@
 #include "dongle/bluetooth.h"
+#include "dongle/a2dp_codec.h"
+#include "dongle/a2dp_source.h"
 #include "dongle/dualsense.h"
 #include "dongle/dualsense_mic.h"
 #include "dongle/hfp_ag.h"
@@ -23,10 +25,8 @@
 #include "l2cap.h"
 #include "l2cap_internal.h"
 #include <misc/byteorder.h>
-#include "a2dp.h"
 #include "sdp.h"
 #include "rfcomm.h"
-#include "sbc/enc/sbc_encoder.h"
 #ifdef CONFIG_BT_AVRCP
 #include "avrcp.h"
 #endif
@@ -167,27 +167,8 @@ static volatile bool media_capture_armed;
 static uint8_t local_address[6];
 static volatile bool avrcp_connected;
 static volatile uint8_t avrcp_volume = 0x50U;
-/* btprofile 1.8.26 increments the four-bit signaling transaction label modulo
- * 16, but bt_avdtp_open incorrectly rejects label zero as "Error id". The
- * SET_CONFIGURATION confirmation calls OPEN after the preceding label 15 has
- * wrapped. Keep this ABI workaround local: the SDK does not expose bt_avdtp.
- * Verified from its RV32 disassembly: label byte 92, signaling channel 76 bytes.
- * Advancing an unused label before OPEN is safe; the preceding response has
- * already completed. No packet in flight is rewritten. */
-struct bt_avdtp;
-_Static_assert(sizeof(struct bt_l2cap_br_chan) == 76, "recheck btprofile AVDTP ABI");
-extern int __real_bt_avdtp_open(struct bt_avdtp *, struct bt_avdtp_stream *);
-int __wrap_bt_avdtp_open(struct bt_avdtp *session, struct bt_avdtp_stream *stream)
-{
-    if (session && stream) {
-        uint8_t *label = (uint8_t *)session + 92;
-        if (!*label) {
-            *label = 1;
-            printf("[RADIO] AVDTP OPEN transaction wrap corrected\r\n");
-        }
-    }
-    return __real_bt_avdtp_open(session, stream);
-}
+struct net_buf_pool a2dp_tx_pool;
+struct net_buf_pool a2dp_rx_pool;
 extern int __real_bt_hci_cmd_send_sync(u16_t opcode, struct net_buf *buf, struct net_buf **rsp);
 int __wrap_bt_hci_cmd_send_sync(u16_t opcode, struct net_buf *buf, struct net_buf **rsp)
 {
@@ -207,16 +188,6 @@ int __wrap_bt_hci_cmd_send_sync(u16_t opcode, struct net_buf *buf, struct net_bu
     }
     return __real_bt_hci_cmd_send_sync(opcode, buf, rsp);
 }
-extern void __real_SBC_Encoder_Init(SBC_ENC_PARAMS *params);
-void __wrap_SBC_Encoder_Init(SBC_ENC_PARAMS *params)
-{
-    /* Cap SBC bitpool to 26 so 5-frame RTP PDUs (338B) fit within a single 3-slot
-     * 2-DH3 packet and fit within residual airtime alongside DualSense HID reports. */
-    if (params && params->s16BitPool > 26) {
-        params->s16BitPool = 26;
-    }
-    __real_SBC_Encoder_Init(params);
-}
 static void audio_failure(uint8_t stage, int error)
 {
     audio_state = 6; audio_error_stage = stage;
@@ -232,7 +203,21 @@ static peer_t *find_peer(struct bt_conn *conn)
 static peer_t *peer_address(const bt_addr_t *address)
 { for (unsigned i = 0; i < PEERS; ++i) if (!memcmp(peers[i].address.val, address->val, 6)) return &peers[i]; return NULL; }
 static peer_t *channel_peer(struct bt_l2cap_chan *chan)
-{ return find_peer(chan->conn); }
+{
+    if (chan == NULL) {
+        return NULL;
+    }
+    peer_t *p = find_peer(chan->conn);
+    if (p != NULL) {
+        return p;
+    }
+    for (unsigned i = 0; i < PEERS; ++i) {
+        if (chan == &peers[i].control.chan || chan == &peers[i].interrupt.chan) {
+            return &peers[i];
+        }
+    }
+    return NULL;
+}
 static bool is_host_addr_blocked(const uint8_t addr[6])
 {
     if (!blocklist_ref || !addr) {
@@ -513,24 +498,6 @@ static void trace_signal(const char *direction, struct bt_conn *conn, uint16_t c
 int __real_bt_l2cap_chan_send(struct bt_l2cap_chan *chan, struct net_buf *buf);
 int __wrap_bt_l2cap_chan_send(struct bt_l2cap_chan *chan, struct net_buf *buf)
 {
-    peer_t *p = find_peer(chan->conn);
-    if (p && p->role) {
-        /* The SDK writes wall-clock milliseconds into SBC RTP timestamps.
-         * Preserve the initial offset, then advance by encoded sample count. */
-        uint32_t next = p->rtp_packets ? p->rtp_samples : buf->len >= 8 ?
-            (uint32_t)buf->data[4] << 24 | (uint32_t)buf->data[5] << 16 |
-            (uint32_t)buf->data[6] << 8 | buf->data[7] : 0;
-        if (dongle_audio_sbc_rtp_timestamp(buf->data, buf->len, &next)) {
-            p->rtp_samples = next; ++p->rtp_packets;
-            if (media_capture_armed && buf->len <= sizeof(media_capture)) {
-                taskENTER_CRITICAL();
-                memcpy(media_capture, buf->data, buf->len);
-                media_capture_size = buf->len;
-                media_capture_armed = false;
-                taskEXIT_CRITICAL();
-            }
-        }
-    }
 #ifdef DONGLE_BT_SIGNAL_TRACE
     if (chan->conn && chan->conn->type == BT_CONN_TYPE_BR)
         trace_signal("TX", chan->conn, ((struct bt_l2cap_br_chan *)chan)->tx.cid, buf);
@@ -812,8 +779,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
         sco_disconnect_sent = false;
         sco_msbc_active = false;
         a2dp_suspended_for_mic = false;
-        hfp_ag_reset_state();
-        dongle_usb_audio_streaming(false);
+        dongle_mic_pipeline_set_hfp_state(false, false, false);
+        dongle_usb_audio_streaming(false, 0U, 44100U, 672U);
         audio_failure(5, reason);
         avrcp_connected = false;
 #ifdef CONFIG_BT_AVRCP
@@ -897,51 +864,272 @@ static void inquiry_complete(struct bt_br_discovery_result *results, size_t coun
     taskEXIT_CRITICAL();
     printf("[RADIO] discovery complete count=%u\r\n", found_count);
 }
-static void audio_chain(struct bt_conn *conn, uint8_t state)
+static struct bt_sdp_attribute a2dp_src_attrs[] = {
+    BT_SDP_NEW_SERVICE,
+    BT_SDP_LIST(
+        BT_SDP_ATTR_SVCLASS_ID_LIST,
+        BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 3),
+        BT_SDP_DATA_ELEM_LIST(
+            { BT_SDP_TYPE_SIZE(BT_SDP_UUID16), BT_SDP_ARRAY_16(BT_SDP_AUDIO_SOURCE_SVCLASS) }
+        )
+    ),
+    BT_SDP_LIST(
+        BT_SDP_ATTR_PROTO_DESC_LIST,
+        BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 16),
+        BT_SDP_DATA_ELEM_LIST(
+            {
+                BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 6),
+                BT_SDP_DATA_ELEM_LIST(
+                    { BT_SDP_TYPE_SIZE(BT_SDP_UUID16), BT_SDP_ARRAY_16(BT_SDP_PROTO_L2CAP) },
+                    { BT_SDP_TYPE_SIZE(BT_SDP_UINT16), BT_SDP_ARRAY_16(0x0019) }
+                )
+            },
+            {
+                BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 6),
+                BT_SDP_DATA_ELEM_LIST(
+                    { BT_SDP_TYPE_SIZE(BT_SDP_UUID16), BT_SDP_ARRAY_16(0x0019) },
+                    { BT_SDP_TYPE_SIZE(BT_SDP_UINT16), BT_SDP_ARRAY_16(0x0103) }
+                )
+            }
+        )
+    ),
+    BT_SDP_LIST(
+        BT_SDP_ATTR_PROFILE_DESC_LIST,
+        BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 8),
+        BT_SDP_DATA_ELEM_LIST(
+            {
+                BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 6),
+                BT_SDP_DATA_ELEM_LIST(
+                    { BT_SDP_TYPE_SIZE(BT_SDP_UUID16), BT_SDP_ARRAY_16(BT_SDP_ADVANCED_AUDIO_SVCLASS) },
+                    { BT_SDP_TYPE_SIZE(BT_SDP_UINT16), BT_SDP_ARRAY_16(0x0103) }
+                )
+            }
+        )
+    ),
+    BT_SDP_SERVICE_NAME("A2DP Source"),
+    {
+        BT_SDP_ATTR_SUPPORTED_FEATURES,
+        { BT_SDP_TYPE_SIZE(BT_SDP_UINT16), BT_SDP_ARRAY_16(0x0001) }
+    },
+};
+static struct bt_sdp_record a2dp_src_record = BT_SDP_RECORD(a2dp_src_attrs);
+
+static dongle_a2dp_source_t a2dp_src;
+static struct bt_l2cap_br_chan a2dp_sig_chan;
+static struct bt_l2cap_br_chan a2dp_media_chan;
+static struct bt_conn *a2dp_acl_conn;
+static volatile bool a2dp_sig_open, a2dp_media_open, a2dp_reconfig_pending;
+static volatile uint8_t a2dp_preferred_codec = DONGLE_AUDIO_CODEC_AUTO;
+static volatile uint32_t a2dp_usb_sample_rate_hz = 44100U;
+static volatile uint8_t a2dp_active_codec = 0xFFU;
+static volatile uint32_t a2dp_bt_sample_rate_hz = 44100U;
+static volatile uint16_t a2dp_media_mtu = 672U;
+
+static struct net_buf *a2dp_alloc_rx(struct bt_l2cap_chan *chan)
 {
-    peer_t *p = find_peer(conn);
-    if (!p || !p->role) return;
-    if (state == BT_A2DP_CHAIN_CONNECTED) {
-        p->audio_connected = true;
-        audio_state = 3; audio_error = audio_error_stage = 0;
-        /* SDK avdtp.c starts bt_source_start_discovery before this callback.
-         * bt_start_discovery uses the sink callback and would overwrite the
-         * pending source transaction, leaving responses unmatched. */
-    } else if (state == BT_A2DP_CHAIN_DISCONNECTED) {
-        p->audio_connected = false;
-        p->audio_start_requested = false;
-        dongle_usb_audio_streaming(false); audio_failure(3, ENOTCONN);
+    (void)chan;
+    return net_buf_alloc(&a2dp_rx_pool, K_NO_WAIT);
+}
+
+static int a2dp_send_l2cap(struct bt_l2cap_br_chan *ch, const uint8_t *data, size_t len)
+{
+    if (!ch->chan.conn || len > 1008U) {
+        return -EINVAL;
+    }
+    struct net_buf *buf = net_buf_alloc(&a2dp_tx_pool, K_NO_WAIT);
+    if (!buf) {
+        return -ENOMEM;
+    }
+    net_buf_reserve(buf, BT_L2CAP_CHAN_SEND_RESERVE);
+    net_buf_add_mem(buf, data, len);
+    const int err = bt_l2cap_chan_send(&ch->chan, buf);
+    if (err < 0) {
+        net_buf_unref(buf);
+    }
+    return err;
+}
+
+static int a2dp_sig_send_cb(void *user, const uint8_t *data, size_t len)
+{
+    (void)user;
+    if (!a2dp_sig_open) {
+        return -ENOTCONN;
+    }
+    return a2dp_send_l2cap(&a2dp_sig_chan, data, len);
+}
+
+static int a2dp_open_media_cb(void *user)
+{
+    (void)user;
+    if (!a2dp_acl_conn) {
+        return -ENOTCONN;
+    }
+    if (a2dp_media_open) {
+        return dongle_a2dp_source_media_connected(&a2dp_src);
+    }
+    a2dp_media_chan.rx.mtu = 1008U;
+    return bt_l2cap_chan_connect(a2dp_acl_conn, &a2dp_media_chan.chan, 0x0019U);
+}
+
+static void a2dp_close_media_cb(void *user)
+{
+    (void)user;
+    if (a2dp_media_chan.chan.conn) {
+        (void)bt_l2cap_chan_disconnect(&a2dp_media_chan.chan);
+    }
+    a2dp_media_open = false;
+}
+
+static void a2dp_on_state_cb(void *user, dongle_a2dp_stream_state_t state,
+                             uint8_t codec, uint32_t rate_hz)
+{
+    (void)user;
+    if (state == DONGLE_A2DP_STATE_STREAMING) {
+        a2dp_active_codec = codec;
+        a2dp_bt_sample_rate_hz = rate_hz ? rate_hz : 44100U;
+        audio_state = 5;
+        uint16_t mtu = a2dp_media_chan.tx.mtu;
+        if (mtu < 256U || mtu > 1008U) mtu = 672U;
+        a2dp_media_mtu = mtu;
+        dongle_usb_audio_streaming(true, codec, a2dp_bt_sample_rate_hz, mtu);
+#ifdef CONFIG_BT_AVRCP
+        if (avrcp_connected) avrcp_set_playback_status(PLAY_STATUS_PLAYING);
+#endif
+        printf("[RADIO] A2DP streaming codec=%u rate=%lu mtu=%u\r\n",
+               codec, (unsigned long)a2dp_bt_sample_rate_hz, mtu);
+    } else if (state == DONGLE_A2DP_STATE_OPEN) {
+        a2dp_active_codec = 0xFFU;
+        audio_state = 4;
+        dongle_usb_audio_streaming(false, 0U, 44100U, 672U);
+#ifdef CONFIG_BT_AVRCP
+        if (avrcp_connected) avrcp_set_playback_status(PLAY_STATUS_PAUSED);
+#endif
+    } else if (state == DONGLE_A2DP_STATE_IDLE) {
+        a2dp_active_codec = 0xFFU;
+        dongle_usb_audio_streaming(false, 0U, 44100U, 672U);
     }
 }
-static void audio_stream(uint8_t state)
+
+static void a2dp_on_error_cb(void *user, uint8_t signal_id, uint8_t error_code)
 {
-    bool active = state == BT_A2DP_STREAM_START;
-    audio_state = active ? 5 : 4;
-    dongle_usb_audio_streaming(active);
-#ifdef CONFIG_BT_AVRCP
-    if (avrcp_connected) avrcp_set_playback_status(active ? PLAY_STATUS_PLAYING : PLAY_STATUS_PAUSED);
-#endif
+    (void)user;
+    printf("[RADIO] A2DP sig=0x%02x err=0x%02x\r\n", signal_id, error_code);
+    audio_failure(3, error_code ? error_code : EIO);
 }
-static void audio_started(void)
+
+static void a2dp_sig_connected(struct bt_l2cap_chan *chan)
 {
-    audio_state = 5;
-    dongle_usb_audio_streaming(true);
-#ifdef CONFIG_BT_AVRCP
-    if (avrcp_connected) avrcp_set_playback_status(PLAY_STATUS_PLAYING);
-#endif
+    peer_t *p = find_peer(chan->conn);
+    a2dp_sig_open = true;
+    a2dp_acl_conn = chan->conn;
+    if (p && p->role) {
+        p->audio_connected = true;
+        audio_state = 3;
+        audio_error = audio_error_stage = 0;
+        if (!p->audio_start_requested) {
+            p->audio_start_requested = true;
+            dongle_a2dp_source_set_preferences(
+                &a2dp_src, (dongle_audio_codec_t)a2dp_preferred_codec,
+                a2dp_usb_sample_rate_hz);
+            if (p->outgoing) {
+                (void)dongle_a2dp_source_connect(&a2dp_src, true);
+            }
+        }
+    }
+    printf("[RADIO] AVDTP signaling connected\r\n");
 }
-static void audio_discovered(struct bt_conn *conn, uint16_t count)
-{ peer_t *p = find_peer(conn); if (p && p->role) printf("[RADIO] A2DP endpoints=%u\r\n", count); }
-static void audio_suspended(void)
+
+static void a2dp_sig_disconnected(struct bt_l2cap_chan *chan)
 {
-    audio_state = 4;
-    dongle_usb_audio_streaming(false);
-#ifdef CONFIG_BT_AVRCP
-    if (avrcp_connected) avrcp_set_playback_status(PLAY_STATUS_PAUSED);
-#endif
+    peer_t *p = find_peer(chan->conn);
+    a2dp_sig_open = false;
+    a2dp_media_open = false;
+    a2dp_acl_conn = NULL;
+    a2dp_active_codec = 0xFFU;
+    dongle_a2dp_source_reset(&a2dp_src);
+    dongle_usb_audio_streaming(false, 0U, 44100U, 672U);
+    if (p && p->role) {
+        p->audio_connected = false;
+        p->audio_start_requested = false;
+        audio_failure(3, ENOTCONN);
+    }
+    printf("[RADIO] AVDTP signaling disconnected\r\n");
 }
-static struct a2dp_callback audio_callbacks = {
-    .chain = audio_chain, .stream = audio_stream, .start_cfm = audio_started, .suspend_cfm = audio_suspended,
+
+static int a2dp_sig_recv(struct bt_l2cap_chan *chan, struct net_buf *buf)
+{
+    (void)chan;
+    if (buf && buf->len >= 2U) {
+        dongle_a2dp_source_recv_signal(&a2dp_src, buf->data, buf->len);
+    }
+    return 0;
+}
+
+static void a2dp_media_connected(struct bt_l2cap_chan *chan)
+{
+    (void)chan;
+    a2dp_media_open = true;
+    (void)dongle_a2dp_source_media_connected(&a2dp_src);
+    printf("[RADIO] AVDTP media connected mtu=%u\r\n", a2dp_media_chan.tx.mtu);
+}
+
+static void a2dp_media_disconnected(struct bt_l2cap_chan *chan)
+{
+    (void)chan;
+    a2dp_media_open = false;
+    a2dp_active_codec = 0xFFU;
+    dongle_usb_audio_streaming(false, 0U, 44100U, 672U);
+    printf("[RADIO] AVDTP media disconnected\r\n");
+}
+
+static int a2dp_media_recv(struct bt_l2cap_chan *chan, struct net_buf *buf)
+{
+    (void)chan;
+    (void)buf;
+    return 0;
+}
+
+static const struct bt_l2cap_chan_ops a2dp_sig_ops = {
+    .alloc_buf = a2dp_alloc_rx,
+    .connected = a2dp_sig_connected,
+    .disconnected = a2dp_sig_disconnected,
+    .recv = a2dp_sig_recv,
+};
+
+static const struct bt_l2cap_chan_ops a2dp_media_ops = {
+    .alloc_buf = a2dp_alloc_rx,
+    .connected = a2dp_media_connected,
+    .disconnected = a2dp_media_disconnected,
+    .recv = a2dp_media_recv,
+};
+
+static int avdtp_l2cap_accept(struct bt_conn *conn, struct bt_l2cap_chan **chan)
+{
+    peer_t *p = find_peer(conn);
+    if (!p || !p->role) {
+        return -EACCES;
+    }
+    if (!a2dp_sig_open && !a2dp_sig_chan.chan.conn) {
+        memset(&a2dp_sig_chan, 0, sizeof(a2dp_sig_chan));
+        a2dp_sig_chan.chan.ops = &a2dp_sig_ops;
+        a2dp_sig_chan.rx.mtu = 672U;
+        *chan = &a2dp_sig_chan.chan;
+        return 0;
+    }
+    if (a2dp_sig_open && !a2dp_media_open && !a2dp_media_chan.chan.conn) {
+        memset(&a2dp_media_chan, 0, sizeof(a2dp_media_chan));
+        a2dp_media_chan.chan.ops = &a2dp_media_ops;
+        a2dp_media_chan.rx.mtu = 1008U;
+        *chan = &a2dp_media_chan.chan;
+        return 0;
+    }
+    return -ENOMEM;
+}
+
+static struct bt_l2cap_server avdtp_server = {
+    .psm = 0x0019U,
+    .sec_level = BT_SECURITY_L2,
+    .accept = avdtp_l2cap_accept,
 };
 #ifdef CONFIG_BT_AVRCP
 static void avrcp_chain(struct bt_conn *conn, uint8_t state)
@@ -1227,35 +1415,27 @@ static void radio_task(void *unused)
             struct bt_conn *connection = p->conn ? bt_conn_ref(p->conn) : NULL;
             taskEXIT_CRITICAL();
             if (!connection) continue;
+            if (p->role && p->authenticated && a2dp_reconfig_pending && a2dp_sig_open) {
+                a2dp_reconfig_pending = false;
+                (void)dongle_a2dp_source_reconfigure(
+                    &a2dp_src, (dongle_audio_codec_t)a2dp_preferred_codec,
+                    a2dp_usb_sample_rate_hz);
+            }
             if (p->role && p->authenticated && p->audio_connected && !p->audio_start_requested &&
                 !dongle_usb_audio_is_streaming() &&
                 !dongle_mic_pipeline_desired_hfp_sco() && !sco_connected && !sco_opening &&
                 !a2dp_suspended_for_mic &&
                 (int32_t)(xTaskGetTickCount() - p->audio_poll_at) >= 0) {
                 p->audio_poll_at = xTaskGetTickCount() + pdMS_TO_TICKS(200);
-                uint16_t mtu;
-                unsigned connected_channels = 0;
-                bool configuring = false;
-                struct bt_l2cap_chan *channel;
-                taskENTER_CRITICAL();
-                SYS_SLIST_FOR_EACH_CONTAINER(&connection->channels, channel, node) {
-                    if (channel->psm == 0x19) {
-                        if (channel->state == BT_L2CAP_CONNECTED) ++connected_channels;
-                        else configuring = true;
-                    }
-                }
-                taskEXIT_CRITICAL();
-                /* OPEN establishes the media transport, but this SDK waits
-                 * for the application to issue START explicitly. MTU alone
-                 * is assigned before media L2CAP configuration completes. */
-                /* Incoming signaling channels retain psm=0 in this SDK;
-                 * require configured outgoing AVDTP transport and no pending
-                 * AVDTP channel, rather than counting two PSM fields. */
-                if (connected_channels && !configuring && !bt_a2dp_get_media_tx_mtu(connection, &mtu) && mtu) {
+                if (a2dp_sig_open && a2dp_src.state == DONGLE_A2DP_STATE_IDLE) {
                     p->audio_start_requested = true;
-                    int result = bt_stream_resume(connection);
-                    printf("[RADIO] A2DP media mtu=%u start=%d\r\n", mtu, result);
-                    if (result < 0) audio_failure(3, result);
+                    dongle_a2dp_source_set_preferences(
+                        &a2dp_src, (dongle_audio_codec_t)a2dp_preferred_codec,
+                        a2dp_usb_sample_rate_hz);
+                    (void)dongle_a2dp_source_connect(&a2dp_src, true);
+                } else if (a2dp_media_open && a2dp_src.state == DONGLE_A2DP_STATE_OPEN) {
+                    p->audio_start_requested = true;
+                    (void)dongle_a2dp_source_start(&a2dp_src);
                 }
             }
             if (p->role && p->authenticated) {
@@ -1344,7 +1524,7 @@ static void radio_task(void *unused)
                         (int32_t)(now - sco_retry_at) >= 0) {
                         if (dongle_usb_audio_is_streaming() || audio_state == 5U) {
                             a2dp_suspended_for_mic = true;
-                            (void)bt_stream_suspend(connection);
+                            (void)dongle_a2dp_source_suspend(&a2dp_src);
                             sco_retry_at = now + pdMS_TO_TICKS(150U);
                         } else if (hfp_ag.selected_codec == 0U) {
                             if (!hfp_ag.bcs_pending && hfp_bcs_wait_until == 0) {
@@ -1403,7 +1583,7 @@ static void radio_task(void *unused)
                                a2dp_suspended_for_mic && !want_sco) {
                         a2dp_suspended_for_mic = false;
                         if (p->audio_connected && dongle_usb_audio_playback_open()) {
-                            (void)bt_stream_resume(connection);
+                            (void)dongle_a2dp_source_start(&a2dp_src);
                         }
                     }
                 }
@@ -1681,7 +1861,14 @@ static void radio_task(void *unused)
             if (!p->saved) save_peer(p);
             if (!p->saved) { bt_conn_unref(connection); continue; }
             if (p->role) {
-                if (!p->opening) { p->opening = true; if (!bt_a2dp_connect(connection)) audio_failure(3, EIO); }
+                if (!p->opening && !a2dp_sig_open && !a2dp_sig_chan.chan.conn) {
+                    p->opening = true;
+                    memset(&a2dp_sig_chan, 0, sizeof(a2dp_sig_chan));
+                    a2dp_sig_chan.chan.ops = &a2dp_sig_ops;
+                    a2dp_sig_chan.rx.mtu = 672U;
+                    int err = bt_l2cap_chan_connect(connection, &a2dp_sig_chan.chan, 0x0019U);
+                    if (err) audio_failure(3, err);
+                }
             } else if (p->outgoing && !p->control_open && !p->control.chan.conn) {
                 int err = bt_l2cap_chan_connect(connection, &p->control.chan, 0x11);
                 if (err) last_error = (uint8_t)-err;
@@ -1724,19 +1911,36 @@ static void radio_task(void *unused)
     }
 }
 bool dongle_bluetooth_ready(void) { return ready; }
-uint8_t dongle_bluetooth_connected(void)
+static uint8_t connected_controllers_locked(void)
 {
     uint8_t mask = 0;
-    for (unsigned i = 0; i < PEERS; ++i)
-        if (!peers[i].role && peers[i].interrupt_open && peers[i].slot < 2) mask |= 1U << peers[i].slot;
+    for (unsigned i = 0; i < PEERS; ++i) {
+        if (!peers[i].role && peers[i].conn != NULL &&
+            peers[i].conn->state == BT_CONN_CONNECTED &&
+            peers[i].interrupt_open && peers[i].slot < 2) {
+            mask |= (uint8_t)(1U << peers[i].slot);
+        }
+    }
+    return mask;
+}
+uint8_t dongle_bluetooth_connected(void)
+{
+    taskENTER_CRITICAL();
+    const uint8_t mask = connected_controllers_locked();
+    taskEXIT_CRITICAL();
     return mask;
 }
 uint8_t dongle_bluetooth_connected_devices(void)
 {
     taskENTER_CRITICAL();
-    uint8_t mask = dongle_bluetooth_connected();
-    for (unsigned i = 0; i < PEERS; ++i)
-        if (peers[i].role && peers[i].conn && peers[i].authenticated) mask |= 4U;
+    uint8_t mask = connected_controllers_locked();
+    for (unsigned i = 0; i < PEERS; ++i) {
+        if (peers[i].role && peers[i].conn != NULL &&
+            peers[i].conn->state == BT_CONN_CONNECTED &&
+            peers[i].authenticated) {
+            mask |= 4U;
+        }
+    }
     taskEXIT_CRITICAL();
     return mask;
 }
@@ -1822,6 +2026,43 @@ void dongle_bluetooth_audio_metrics(uint8_t out[12])
     }
     taskEXIT_CRITICAL();
     out[11] = link_roles;
+}
+int dongle_bluetooth_send_a2dp_media(const uint8_t *pdu, size_t len)
+{
+    if (!a2dp_media_open || !a2dp_media_chan.chan.conn || pdu == NULL || len == 0U) {
+        return -ENOTCONN;
+    }
+    if (media_capture_armed && len <= sizeof(media_capture)) {
+        taskENTER_CRITICAL();
+        memcpy(media_capture, pdu, len);
+        media_capture_size = (uint16_t)len;
+        media_capture_armed = false;
+        taskEXIT_CRITICAL();
+    }
+    return a2dp_send_l2cap(&a2dp_media_chan, pdu, len);
+}
+void dongle_bluetooth_set_audio_codec(uint8_t codec)
+{
+    if (codec < DONGLE_AUDIO_CODEC_COUNT && a2dp_preferred_codec != codec) {
+        a2dp_preferred_codec = codec;
+        if (a2dp_sig_open) {
+            a2dp_reconfig_pending = true;
+        }
+    }
+}
+void dongle_bluetooth_set_usb_sample_rate(uint32_t sample_rate_hz)
+{
+    if ((sample_rate_hz == 44100U || sample_rate_hz == 48000U ||
+         sample_rate_hz == 96000U) && a2dp_usb_sample_rate_hz != sample_rate_hz) {
+        a2dp_usb_sample_rate_hz = sample_rate_hz;
+        if (a2dp_sig_open && a2dp_bt_sample_rate_hz != sample_rate_hz) {
+            a2dp_reconfig_pending = true;
+        }
+    }
+}
+uint8_t dongle_bluetooth_active_audio_codec(void)
+{
+    return a2dp_active_codec;
 }
 void dongle_bluetooth_local_address(uint8_t out[6])
 {
@@ -2093,6 +2334,16 @@ int dongle_bluetooth_start(dongle_device_catalog_t *devices, dongle_settings_sto
     if (rfparam_init(0, NULL, 0)) return -EIO;
     net_buf_init(&hid_tx_pool, 12, BT_L2CAP_BUF_SIZE(HID_MTU), NULL);
     net_buf_init(&hid_rx_pool, 10, BT_L2CAP_BUF_SIZE(HID_MTU), NULL);
+    net_buf_init(&a2dp_tx_pool, 6, BT_L2CAP_BUF_SIZE(1024), NULL);
+    net_buf_init(&a2dp_rx_pool, 4, BT_L2CAP_BUF_SIZE(1024), NULL);
+    const dongle_a2dp_source_callbacks_t a2dp_cb = {
+        .send_signal = a2dp_sig_send_cb,
+        .open_media = a2dp_open_media_cb,
+        .close_media = a2dp_close_media_cb,
+        .on_state = a2dp_on_state_cb,
+        .on_error = a2dp_on_error_cb,
+    };
+    dongle_a2dp_source_init(&a2dp_src, &a2dp_cb, NULL);
     btble_controller_init(configMAX_PRIORITIES - 1);
     hci_driver_init();
     bt_conn_cb_register(&connection_callbacks); bt_conn_auth_cb_register(&authentication);
@@ -2108,11 +2359,11 @@ int dongle_bluetooth_start(dongle_device_catalog_t *devices, dongle_settings_sto
     }
     address_out(local_address, &local.a);
     printf("[RADIO] ready %02x:%02x:%02x:%02x:%02x:%02x\r\n", local.a.val[5],local.a.val[4],local.a.val[3],local.a.val[2],local.a.val[1],local.a.val[0]);
-    a2dp_cb_register(&audio_callbacks);
 #ifdef CONFIG_BT_AVRCP
     avrcp_cb_register(&avrcp_callbacks);
 #endif
-    bt_a2dp_discovery_cb_register(audio_discovered);
+    (void)bt_sdp_register_service(&a2dp_src_record);
+    (void)bt_l2cap_br_server_register(&avdtp_server);
     bt_l2cap_br_server_register(&control_server); bt_l2cap_br_server_register(&input_server);
     (void)bt_sdp_register_service(&hfp_ag_record);
     (void)bt_rfcomm_server_register(&hfp_server);

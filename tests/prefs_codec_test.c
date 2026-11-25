@@ -1,4 +1,5 @@
 #include "dongle/prefs_codec.h"
+#include "dongle/a2dp_codec.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,12 +44,21 @@ int main(void)
           DONGLE_PREFS_INVALID_DATA);
     CHECK(decoded.boot_profile == DONGLE_PROFILE_DUALSENSE);
 
+    /* Valid audio codecs 0..5 -> accepted by encode/decode. */
+    for (uint8_t c = 0U; c < DONGLE_AUDIO_CODEC_COUNT; ++c) {
+        dongle_prefs_t p = prefs;
+        p.audio_codec = c;
+        CHECK(dongle_prefs_encode(&p, blob, sizeof(blob)) == DONGLE_PREFS_OK);
+        CHECK(dongle_prefs_decode(blob, sizeof(blob), &decoded) == DONGLE_PREFS_OK);
+        CHECK(decoded.audio_codec == c);
+    }
+
     /* Invalid enum values -> rejected by encode. */
     dongle_prefs_t invalid = prefs;
     invalid.boot_profile = DONGLE_PROFILE_COUNT;
     CHECK(dongle_prefs_encode(&invalid, blob, sizeof(blob)) == DONGLE_PREFS_INVALID_DATA);
     invalid = prefs;
-    invalid.audio_codec = 2U;
+    invalid.audio_codec = DONGLE_AUDIO_CODEC_COUNT;
     CHECK(dongle_prefs_encode(&invalid, blob, sizeof(blob)) == DONGLE_PREFS_INVALID_DATA);
     invalid = prefs;
     invalid.mic_source = DONGLE_MIC_SOURCE_COUNT;

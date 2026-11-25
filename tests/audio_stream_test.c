@@ -19,13 +19,19 @@ static void test_pcm_format_validation(void)
         .channels = 2U,
         .bits_per_sample = 16U,
     };
-    const dongle_audio_format_t unsupported = {
+    const dongle_audio_format_t supported_96k = {
         .sample_rate_hz = 96000U,
+        .channels = 2U,
+        .bits_per_sample = 16U,
+    };
+    const dongle_audio_format_t unsupported = {
+        .sample_rate_hz = 192000U,
         .channels = 2U,
         .bits_per_sample = 16U,
     };
 
     CHECK(dongle_audio_format_is_supported(&supported));
+    CHECK(dongle_audio_format_is_supported(&supported_96k));
     CHECK(!dongle_audio_format_is_supported(&unsupported));
     CHECK(!dongle_audio_format_is_supported(NULL));
 }

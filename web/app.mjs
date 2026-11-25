@@ -25,6 +25,7 @@ import {
 import { HidProtocol, HID_FILTERS } from "./hid-protocol.mjs";
 
 const CHUNK_SIZE = 1024;
+const THEME_STORAGE_KEY = "uni-usb-dongle-theme";
 
 const el = (id) => document.getElementById(id);
 
@@ -33,6 +34,7 @@ const elements = {
   connectBtn: el("connectBtn"),
   disconnectBtn: el("disconnectBtn"),
   refreshBtn: el("refreshBtn"),
+  themeToggleBtn: el("themeToggleBtn"),
   reconnectBannerBtn: el("reconnectBannerBtn"),
   connectionState: el("connectionState"),
   headerProfilePill: el("headerProfilePill"),
@@ -383,7 +385,10 @@ function renderOverviewAndProfile() {
   }
 
   if (radio) {
-    elements.overviewAudio.textContent = radio.streaming ? "Streaming SBC" :
+    const activeCodecName = snapshot.profileState && snapshot.profileState.activeCodec !== null
+      ? snapshot.profileState.activeCodecLabel
+      : "A2DP";
+    elements.overviewAudio.textContent = radio.streaming ? `Streaming ${activeCodecName}` :
       radio.headphone !== "00:00:00:00:00:00" ? "Headphone Saved" : "Not Paired";
     elements.overviewAudioMeta.textContent = headphoneStatus(radio);
   }
@@ -623,7 +628,10 @@ function renderAudioAndMic() {
   }
 
   if (audio) {
-    elements.audioPlaybackState.textContent = radio && radio.streaming ? "Streaming A2DP SBC" : "Idle / Standby";
+    const activeCodecName = snapshot.profileState && snapshot.profileState.activeCodec !== null
+      ? snapshot.profileState.activeCodecLabel
+      : "A2DP";
+    elements.audioPlaybackState.textContent = radio && radio.streaming ? `Streaming ${activeCodecName}` : "Idle / Standby";
     elements.audioAvrcpState.textContent = audio.avrcpConnected
       ? `Connected (Vol ${audio.avrcpVolume}/127)` : "Disconnected";
     elements.audioNonzero.textContent = String(audio.nonzeroPackets);
@@ -841,7 +849,7 @@ async function refreshAll() {
   if (profRaw) {
     snapshot.profileState = parseProfileState(profRaw);
     updateProfileCardSelection(snapshot.profileState.requested);
-    elements.codecSelect.value = String(snapshot.profileState.codec > 1 ? 0 : snapshot.profileState.codec);
+    elements.codecSelect.value = String(snapshot.profileState.codec <= 5 ? snapshot.profileState.codec : 0);
   } else {
     snapshot.profileState = null;
   }
@@ -1139,7 +1147,41 @@ async function handleAbortOta() {
   }
 }
 
+function applyTheme(theme, { persist = true } = {}) {
+  const normalized = theme === "light" ? "light" : "black";
+  document.documentElement.dataset.theme = normalized;
+  if (elements.themeToggleBtn) {
+    const isBlack = normalized === "black";
+    elements.themeToggleBtn.textContent = isBlack ? "Theme: Black" : "Theme: Light";
+    elements.themeToggleBtn.setAttribute("aria-pressed", isBlack ? "true" : "false");
+  }
+  if (persist) {
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, normalized);
+    } catch {}
+  }
+}
+
+function initTheme() {
+  let saved = null;
+  try {
+    saved = localStorage.getItem(THEME_STORAGE_KEY);
+  } catch {}
+  const initial = saved === "light" || saved === "black"
+    ? saved
+    : document.documentElement.dataset.theme;
+  applyTheme(initial, { persist: false });
+
+  if (elements.themeToggleBtn) {
+    elements.themeToggleBtn.addEventListener("click", () => {
+      const next = document.documentElement.dataset.theme === "light" ? "black" : "light";
+      applyTheme(next);
+    });
+  }
+}
+
 function wireEvents() {
+  initTheme();
   initTabs();
 
   for (const card of elements.profileCards) {

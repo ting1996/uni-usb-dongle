@@ -1,4 +1,5 @@
 #include "dongle/prefs_codec.h"
+#include "dongle/a2dp_codec.h"
 #include "codec_crc32.h"
 
 #include <stdbool.h>
@@ -12,7 +13,7 @@ static bool prefs_is_valid(const dongle_prefs_t *prefs)
 {
     return prefs != NULL &&
            prefs->boot_profile < DONGLE_PROFILE_COUNT &&
-           prefs->audio_codec <= 1U &&
+           prefs->audio_codec < DONGLE_AUDIO_CODEC_COUNT &&
            prefs->mic_source < DONGLE_MIC_SOURCE_COUNT;
 }
 

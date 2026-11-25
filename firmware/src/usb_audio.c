@@ -1,18 +1,22 @@
 #include "dongle/usb_audio.h"
+#include "dongle/a2dp_encoder.h"
+#include "dongle/a2dp_packetizer.h"
 #include "dongle/audio_stream.h"
+#include "dongle/bluetooth.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "usbd_core.h"
-#include "bluetooth.h"
-#include "conn.h"
-#include "l2cap.h"
-#include "a2dp.h"
 #include "bflb_mtimer.h"
 #include <stdio.h>
 #include <string.h>
 
 static uint8_t bus;
 static volatile bool playing, configured, opened;
+static volatile uint32_t usb_sample_rate_hz = 44100U;
+static volatile uint8_t bt_codec = DONGLE_AUDIO_CODEC_SBC;
+static volatile uint32_t bt_sample_rate_hz = 44100U;
+static volatile uint16_t bt_media_mtu = 672U;
+static volatile bool encoder_reset_pending;
 static dongle_audio_stream_t pcm;
 static uint8_t storage[32768];
 _Static_assert((sizeof(storage) & (sizeof(storage) - 1U)) == 0U, "pcm storage must be a power of two");
@@ -26,16 +30,25 @@ static volatile int mic_volume_db;
 static volatile uint16_t mic_peak;
 static volatile uint32_t mic_sent_bytes, mic_errors;
 static TaskHandle_t audio_task_handle;
-static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t packet[256];
+static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t packet[512];
 static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t mic_packet[64];
 static struct usbd_interface control, stream, mic_stream;
 static struct audio_entity_info audio_entities[] = {
     { .bEntityId = 4, .bDescriptorSubtype = AUDIO_CONTROL_FEATURE_UNIT, .ep = 0x84 },
 };
-/* This SDK A2DP source encoder uses fixed 44.1 kHz joint stereo PCM. */
 
-void dongle_usb_audio_streaming(bool active) { playing = active;
-    printf("[AUDIO] streaming=%u SBC 44100 Hz stereo\r\n", active);
+void dongle_usb_audio_streaming(bool active, uint8_t codec, uint32_t rate_hz, uint16_t media_mtu)
+{
+    if (active) {
+        bt_codec = codec;
+        bt_sample_rate_hz = rate_hz ? rate_hz : 44100U;
+        bt_media_mtu = media_mtu ? media_mtu : 672U;
+        encoder_reset_pending = true;
+    }
+    playing = active;
+    printf("[AUDIO] streaming=%u codec=%u bt_rate=%lu usb_rate=%lu\r\n",
+           active ? 1U : 0U, codec, (unsigned long)bt_sample_rate_hz,
+           (unsigned long)usb_sample_rate_hz);
 }
 bool dongle_usb_audio_is_streaming(void) { return playing; }
 bool dongle_usb_audio_playback_open(void) { return configured && opened; }
@@ -93,7 +106,7 @@ static void audio_received(uint8_t id, uint8_t ep, uint32_t size)
 {
     if (id != bus || ep != 3 || !opened) return;
     size_t written = 0;
-    if (size <= 180 && !(size % 4)) {
+    if (size <= 388U && !(size % 4U)) {
         uint16_t pkt_peak = 0U;
         for (uint32_t i = 0; i + 3U < size; i += 4U) {
             const int16_t l = (int16_t)((uint16_t)packet[i] | ((uint16_t)packet[i + 1U] << 8U));
@@ -110,7 +123,7 @@ static void audio_received(uint8_t id, uint8_t ep, uint32_t size)
         received += written;
         if (written < size) ++overflows;
     } else ++errors;
-    if (usbd_ep_start_read(bus, 3, packet, 180)) ++errors;
+    if (usbd_ep_start_read(bus, 3, packet, 388)) ++errors;
 }
 static uint16_t db_to_q15_gain(int db)
 {
@@ -173,7 +186,7 @@ void usbd_audio_open(uint8_t id, uint8_t intf)
     if (id != bus) return;
     if (intf == 1) {
         opened = true;
-        if (usbd_ep_start_read(bus, 3, packet, 180)) ++errors;
+        if (usbd_ep_start_read(bus, 3, packet, 388)) ++errors;
     } else if (intf == 2) {
         dongle_audio_stream_reset(&mic_pcm);
         mic_opened = true;
@@ -195,10 +208,23 @@ void usbd_audio_close(uint8_t id, uint8_t intf)
         dongle_audio_stream_reset(&mic_pcm);
     }
 }
+void usbd_audio_set_sampling_freq(uint8_t id, uint8_t ep, uint32_t sampling_freq)
+{
+    (void)id;
+    if (ep == 3U && (sampling_freq == 44100U || sampling_freq == 48000U ||
+                     sampling_freq == 96000U)) {
+        if (usb_sample_rate_hz != sampling_freq) {
+            usb_sample_rate_hz = sampling_freq;
+            dongle_audio_stream_reset(&pcm);
+            dongle_bluetooth_set_usb_sample_rate(sampling_freq);
+            printf("[AUDIO] usb_rate=%lu\r\n", (unsigned long)sampling_freq);
+        }
+    }
+}
 uint32_t usbd_audio_get_sampling_freq(uint8_t id, uint8_t ep)
 {
     (void)id;
-    return ep == 0x84 ? 16000U : 44100U;
+    return ep == 0x84 ? 16000U : usb_sample_rate_hz;
 }
 void usbd_audio_set_mute(uint8_t id, uint8_t ep, uint8_t ch, bool mute)
 {
@@ -235,10 +261,10 @@ void dongle_usb_audio_event(uint8_t event)
 static void audio_task(void *unused)
 {
     (void)unused;
-    /* The SDK queues borrowed PCM pointers; alternating buffers keep the
-     * previous block alive until the next submission consumes its semaphore. */
-    static int16_t blocks[2][256];
-    unsigned next = 0;
+    static int16_t usb_pcm[2048 * 2];
+    static int16_t bt_pcm[1024 * 2];
+    static uint8_t media_pdu[1024];
+    bool enc_open = false;
     uint64_t epoch = 0, frames = 0;
     for (;;) {
         if (configured && mic_opened) {
@@ -257,34 +283,89 @@ static void audio_task(void *unused)
                            atomic_load_explicit(&pcm.read_cursor, memory_order_relaxed);
         const bool playing_now = playing;
         if (!playing_now || !opened) {
+            if (enc_open) {
+                dongle_a2dp_encoder_close();
+                enc_open = false;
+            }
             epoch = frames = 0;
             if (available) {
                 size_t discarded;
-                dongle_audio_stream_read(&pcm, (uint8_t *)blocks[next], sizeof(blocks[0]), &discarded);
+                dongle_audio_stream_read(&pcm, (uint8_t *)usb_pcm, sizeof(usb_pcm), &discarded);
             }
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
+        if (encoder_reset_pending || !enc_open) {
+            encoder_reset_pending = false;
+            const bool ctrl_active = (dongle_bluetooth_connected() & 0x03U) != 0U;
+            if (dongle_a2dp_encoder_open((dongle_audio_codec_t)bt_codec,
+                                         bt_sample_rate_hz, bt_media_mtu,
+                                         ctrl_active) == 0) {
+                enc_open = true;
+            } else {
+                enc_open = false;
+                ++errors;
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+            epoch = frames = 0;
+        }
+        const uint32_t bt_rate = bt_sample_rate_hz;
+        const uint32_t usb_rate = usb_sample_rate_hz;
+        const size_t bt_frames = dongle_a2dp_encoder_frame_samples();
+        size_t usb_frames = (usb_rate == bt_rate)
+            ? bt_frames
+            : (size_t)(((uint64_t)bt_frames * usb_rate + (bt_rate / 2U)) / bt_rate);
+        if (usb_frames == 0U) usb_frames = bt_frames;
+        if (usb_frames > 2048U) usb_frames = 2048U;
+        const size_t usb_bytes = usb_frames * 4U;
+
         uint64_t now = bflb_mtimer_get_time_us();
         if (!epoch) {
-            if (available < 7056) { vTaskDelay(1); continue; }
-            epoch = now; frames = 0;
+            const size_t prebuf = (size_t)((usb_rate * 40ULL) / 1000ULL) * 4U;
+            if (available < (prebuf > usb_bytes ? prebuf : usb_bytes)) {
+                vTaskDelay(1);
+                continue;
+            }
+            epoch = now;
+            frames = 0;
         }
-        if ((now - epoch) * 44100 < frames * 1000000ULL) { vTaskDelay(1); continue; }
-        if (available < sizeof(blocks[0])) {
-            ++underflows; epoch = frames = 0; vTaskDelay(1); continue;
+        if ((now - epoch) * bt_rate < frames * 1000000ULL) {
+            vTaskDelay(1);
+            continue;
         }
-        size_t n;
-        dongle_audio_stream_read(&pcm, (uint8_t *)blocks[next], sizeof(blocks[0]), &n);
-        if (playing && opened && n == sizeof(blocks[0])) {
-            if (bt_a2dp_send_media(blocks[next], n)) ++errors;
-            else sent += n;
-            next ^= 1;
-            frames += 128;
-            /* If the radio stalls for over 60 ms, rebuffer instead of sending
-             * an unbounded burst of stale audio to catch up. */
-            if ((bflb_mtimer_get_time_us() - epoch) * 44100 >
-                frames * 1000000ULL + 2646000000ULL) epoch = frames = 0;
+        if (available < usb_bytes) {
+            ++underflows;
+            epoch = frames = 0;
+            vTaskDelay(1);
+            continue;
+        }
+        size_t n = 0U;
+        dongle_audio_stream_read(&pcm, (uint8_t *)usb_pcm, usb_bytes, &n);
+        if (playing && opened && n == usb_bytes) {
+            const int16_t *src_pcm = usb_pcm;
+            if (usb_rate != bt_rate) {
+                dongle_audio_resample_s16_stereo(usb_pcm, usb_frames, bt_pcm, bt_frames);
+                src_pcm = bt_pcm;
+            }
+            size_t pdu_len = 0U;
+            if (dongle_a2dp_encoder_encode(src_pcm, bt_frames, media_pdu,
+                                           sizeof(media_pdu), &pdu_len) == 0) {
+                if (pdu_len > 0U) {
+                    if (dongle_bluetooth_send_a2dp_media(media_pdu, pdu_len) < 0) {
+                        ++errors;
+                    } else {
+                        sent += (uint32_t)(bt_frames * 4U);
+                    }
+                }
+            } else {
+                ++errors;
+            }
+            frames += bt_frames;
+            if ((bflb_mtimer_get_time_us() - epoch) * bt_rate >
+                frames * 1000000ULL + (uint64_t)bt_rate * 60000ULL) {
+                epoch = frames = 0;
+            }
         }
     }
 }
@@ -308,5 +389,5 @@ int dongle_usb_audio_register(uint8_t id)
     if (dongle_audio_stream_init(&mic_pcm, mic_storage, sizeof(mic_storage), &mic_format) != DONGLE_AUDIO_STREAM_OK) return -1;
     dongle_usb_audio_attach(id);
     if (audio_task_handle != NULL) return 0;
-    return xTaskCreate(audio_task, "usb_audio", 1536, NULL, 5, &audio_task_handle) == pdPASS ? 0 : -1;
+    return xTaskCreate(audio_task, "usb_audio", 3072, NULL, 5, &audio_task_handle) == pdPASS ? 0 : -1;
 }

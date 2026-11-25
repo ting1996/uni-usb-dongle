@@ -9,9 +9,7 @@ sdk_add_compile_definitions(CONFIG_BT_RX_BUF_COUNT=8)
 sdk_add_compile_definitions(CONFIG_BT_L2CAP_TX_BUF_COUNT=8)
 option(DONGLE_BT_SIGNAL_TRACE "Trace bounded headphone L2CAP signaling during negotiation" OFF)
 sdk_add_link_options("-Wl,--wrap=bt_l2cap_chan_send")
-sdk_add_link_options("-Wl,--wrap=bt_avdtp_open")
 sdk_add_link_options("-Wl,--wrap=bt_hci_cmd_send_sync")
-sdk_add_link_options("-Wl,--wrap=SBC_Encoder_Init")
 if(DONGLE_BT_SIGNAL_TRACE)
     target_compile_definitions(app PRIVATE DONGLE_BT_SIGNAL_TRACE=1)
     sdk_add_link_options("-Wl,--wrap=bt_l2cap_recv")
@@ -21,9 +19,58 @@ foreach(function easyflash_init ef_get_env_blob_offset ef_get_env_blob ef_set_en
 endforeach()
 sdk_add_include_directories(
     ${BL_SDK_BASE}/components/wireless/bluetooth/blestack/src/include
+    ${BL_SDK_BASE}/components/wireless/bluetooth/blestack/src/sbc/enc
     ${BL_SDK_BASE}/components/multimedia/opus/include
+    ../third_party/libldac/inc
+    ../third_party/libopenaptx
+    ../third_party/vo-aacenc/common/include
+    ../third_party/vo-aacenc/aacenc/inc
+    ../third_party/vo-aacenc/aacenc/basic_op
+)
+set(VO_AACENC_SOURCES
+    ../third_party/vo-aacenc/common/cmnMemory.c
+    ../third_party/vo-aacenc/aacenc/basic_op/basicop2.c
+    ../third_party/vo-aacenc/aacenc/basic_op/oper_32b.c
+    ../third_party/vo-aacenc/aacenc/src/aac_rom.c
+    ../third_party/vo-aacenc/aacenc/src/aacenc.c
+    ../third_party/vo-aacenc/aacenc/src/aacenc_core.c
+    ../third_party/vo-aacenc/aacenc/src/adj_thr.c
+    ../third_party/vo-aacenc/aacenc/src/band_nrg.c
+    ../third_party/vo-aacenc/aacenc/src/bit_cnt.c
+    ../third_party/vo-aacenc/aacenc/src/bitbuffer.c
+    ../third_party/vo-aacenc/aacenc/src/bitenc.c
+    ../third_party/vo-aacenc/aacenc/src/block_switch.c
+    ../third_party/vo-aacenc/aacenc/src/channel_map.c
+    ../third_party/vo-aacenc/aacenc/src/dyn_bits.c
+    ../third_party/vo-aacenc/aacenc/src/grp_data.c
+    ../third_party/vo-aacenc/aacenc/src/interface.c
+    ../third_party/vo-aacenc/aacenc/src/line_pe.c
+    ../third_party/vo-aacenc/aacenc/src/memalign.c
+    ../third_party/vo-aacenc/aacenc/src/ms_stereo.c
+    ../third_party/vo-aacenc/aacenc/src/pre_echo_control.c
+    ../third_party/vo-aacenc/aacenc/src/psy_configuration.c
+    ../third_party/vo-aacenc/aacenc/src/psy_main.c
+    ../third_party/vo-aacenc/aacenc/src/qc_main.c
+    ../third_party/vo-aacenc/aacenc/src/quantize.c
+    ../third_party/vo-aacenc/aacenc/src/sf_estim.c
+    ../third_party/vo-aacenc/aacenc/src/spreading.c
+    ../third_party/vo-aacenc/aacenc/src/stat_bits.c
+    ../third_party/vo-aacenc/aacenc/src/tns.c
+    ../third_party/vo-aacenc/aacenc/src/transform.c
+)
+set(THIRD_PARTY_CODEC_SOURCES
+    ../third_party/libldac/src/ldaclib.c
+    ../third_party/libldac/src/ldacBT.c
+    ../third_party/libopenaptx/openaptx.c
+    ${VO_AACENC_SOURCES}
+)
+set_source_files_properties(${THIRD_PARTY_CODEC_SOURCES} PROPERTIES
+    COMPILE_DEFINITIONS "__unused="
+    COMPILE_OPTIONS "-Wno-unused-parameter;-Wno-sign-compare;-Wno-unused-variable;-Wno-unused-but-set-variable;-Wno-implicit-fallthrough;-Wno-maybe-uninitialized"
 )
 target_sources(app PRIVATE
+    ../src/core/a2dp_packetizer.c
+    ../src/core/a2dp_source.c
     ../src/core/audio_stream.c
     ../src/core/device_blocklist.c
     ../src/core/device_catalog.c
@@ -37,8 +84,10 @@ target_sources(app PRIVATE
     ../src/core/settings_codec.c
     ../src/core/usb_ota_protocol.c
     src/settings_store.c
+    src/a2dp_encoder.c
     src/bluetooth_storage.c
     src/bluetooth.c
+    ${THIRD_PARTY_CODEC_SOURCES}
     src/mic_pipeline.c
     src/usb_audio.c
     src/usb_gamepad.c

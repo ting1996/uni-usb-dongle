@@ -1,10 +1,18 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="black">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Uni USB Dongle Control Center</title>
   <link rel="stylesheet" href="./styles.css">
+  <script>
+    try {
+      const savedTheme = localStorage.getItem("uni-usb-dongle-theme");
+      if (savedTheme === "light" || savedTheme === "black") {
+        document.documentElement.dataset.theme = savedTheme;
+      }
+    } catch {}
+  </script>
 </head>
 <body>
   <header class="topbar">
@@ -27,6 +35,7 @@
         <button id="connectBtn" class="btn-primary">Connect</button>
         <button id="disconnectBtn" disabled>Disconnect</button>
         <button id="refreshBtn" disabled>Refresh</button>
+        <button id="themeToggleBtn" type="button" aria-pressed="true" title="Toggle black/light theme">Theme: Black</button>
       </div>
     </div>
     <div class="status-bar" id="statusBar" role="status" aria-live="polite">
@@ -103,8 +112,12 @@
           <label class="field-label">
             Preferred Audio Codec
             <select id="codecSelect" disabled>
-              <option value="0">Auto (SBC)</option>
-              <option value="1">SBC 44.1 kHz Stereo</option>
+              <option value="0">Auto (LDAC → aptX HD → aptX → AAC → SBC)</option>
+              <option value="1">SBC</option>
+              <option value="2">AAC-LC</option>
+              <option value="3">LDAC</option>
+              <option value="4">aptX</option>
+              <option value="5">aptX HD</option>
             </select>
           </label>
           <label class="checkbox-label">
@@ -208,7 +221,7 @@
         <div class="card-header">
           <div>
             <h2>Stereo Playback &amp; Audio Stream</h2>
-            <p class="muted">44.1 kHz UAC1 stereo playback over Bluetooth SBC.</p>
+            <p class="muted">44.1 / 48 / 96 kHz UAC1 stereo playback over Bluetooth A2DP (SBC, AAC-LC, LDAC, aptX, aptX HD).</p>
           </div>
         </div>
         <div class="metrics-grid">

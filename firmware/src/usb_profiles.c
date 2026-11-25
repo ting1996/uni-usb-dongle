@@ -1,4 +1,6 @@
 #include "dongle/usb_profiles.h"
+#include "dongle/a2dp_codec.h"
+#include "dongle/bluetooth.h"
 #include "dongle/usb_gamepad.h"
 #include "dongle/usb_audio.h"
 #include "FreeRTOS.h"
@@ -115,7 +117,8 @@ void dongle_usb_profile_init(uint8_t saved_profile, uint8_t saved_codec)
         saved_default = DONGLE_PROFILE_GENERIC;
         persisted_default = false;
     }
-    codec_requested = saved_codec <= 1U ? saved_codec : 0U;
+    codec_requested = saved_codec < DONGLE_AUDIO_CODEC_COUNT ? saved_codec : 0U;
+    dongle_bluetooth_set_audio_codec(codec_requested);
     transition = 0U;
     failure = 0U;
     apply_device_identity(active);
@@ -158,10 +161,10 @@ bool dongle_usb_profile_set_connected_controllers(uint8_t connected_mask)
 }
 uint8_t dongle_usb_profile_request(uint8_t profile, uint8_t codec, bool persist)
 {
-    if (profile >= DONGLE_PROFILE_COUNT || codec > 3) return 1;
-    if (codec > 1) return 8; /* AAC/LDAC encoders are not integrated. */
+    if (profile >= DONGLE_PROFILE_COUNT || codec >= DONGLE_AUDIO_CODEC_COUNT) return 1;
     if (transition == 1 || transition == 2) return 3;
     requested = profile; codec_requested = codec; failure = 0;
+    dongle_bluetooth_set_audio_codec(codec_requested);
     if (persist) {
         saved_default = profile;
         persisted_default = true;
@@ -174,8 +177,9 @@ size_t dongle_usb_profile_state(uint8_t out[12])
 {
     const uint8_t flags = (uint8_t)((persisted_default ? 0x01U : 0U) |
                                     (active_gamepads == 2U ? 0x02U : 0U));
+    const uint8_t active_codec = dongle_bluetooth_active_audio_codec();
     const uint8_t state[12] = {0,1,active,requested,0x1f,codec_requested,
-        dongle_usb_audio_is_streaming() ? 1 : 0xff,3,transition,failure,
+        active_codec,DONGLE_AUDIO_CODEC_MASK,transition,failure,
         saved_default,flags};
     memcpy(out, state, sizeof(state)); return sizeof(state);
 }

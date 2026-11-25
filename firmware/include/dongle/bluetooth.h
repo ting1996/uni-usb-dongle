@@ -32,4 +32,8 @@ bool dongle_bluetooth_send_dualsense_feature(
     uint8_t slot, const uint8_t *usb_report, size_t size);
 bool dongle_bluetooth_dualsense_metrics(
     uint8_t slot, uint8_t out[DONGLE_DUALSENSE_METRICS_PAYLOAD_SIZE]);
+int dongle_bluetooth_send_a2dp_media(const uint8_t *pdu, size_t len);
+void dongle_bluetooth_set_audio_codec(uint8_t codec);
+void dongle_bluetooth_set_usb_sample_rate(uint32_t sample_rate_hz);
+uint8_t dongle_bluetooth_active_audio_codec(void);
 #endif

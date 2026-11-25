@@ -42,7 +42,7 @@ it does not establish whether pairing succeeded or the remote refused it.
 Pairing keys and controller slots share the existing single
 LittleFS mount. SSP Just Works is accepted only for selected or saved peers.
 
-Playback is 44.1 kHz, 16-bit stereo PCM over USB, encoded by the SDK SBC source.
+Playback supports 44.1 / 48 / 96 kHz, 16-bit stereo PCM over UAC1 USB Audio, encoded via a custom AVDTP 1.3 / A2DP Source stack supporting SBC, AAC-LC (`vo-aacenc` + RFC 3016 LATM), LDAC (`libldac` up to 96 kHz), aptX, and aptX HD (`libopenaptx`), with automatic fallback and on-the-fly resampling when host and Bluetooth sample rates differ.
 Starting in v1.1.0, USB microphone capture (`16 kHz` mono S16_LE) supports both Sony BRAVIA
 Theatre U via custom HFP-AG v1.7 (mSBC wideband `16 kHz` with CVSD `8 kHz -> 16 kHz` fallback;
 A2DP suspends automatically during SCO mic capture and resumes when closed) and DualSense Bluetooth

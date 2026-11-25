@@ -53,7 +53,20 @@ export const AUDIO_CODEC = Object.freeze({
   sbc: 1,
   aac: 2,
   ldac: 3,
+  aptx: 4,
+  aptxHd: 5,
 });
+
+export function audioCodecLabel(codecId) {
+  return ({
+    [AUDIO_CODEC.auto]: "Auto",
+    [AUDIO_CODEC.sbc]: "SBC",
+    [AUDIO_CODEC.aac]: "AAC-LC",
+    [AUDIO_CODEC.ldac]: "LDAC",
+    [AUDIO_CODEC.aptx]: "aptX",
+    [AUDIO_CODEC.aptxHd]: "aptX HD",
+  })[codecId] || `Codec ${codecId}`;
+}
 
 export const MIC_SOURCE = Object.freeze({
   auto: 0,
@@ -190,6 +203,8 @@ export function parseProfileState(bytes) {
     profileMask: bytes[4],
     codec: bytes[5],
     streaming: bytes[6] === 0xff ? null : !!bytes[6],
+    activeCodec: bytes[6] === 0xff ? null : bytes[6],
+    activeCodecLabel: bytes[6] === 0xff ? "Idle" : audioCodecLabel(bytes[6]),
     codecMask: bytes[7],
     transition: bytes[8],
     failure: bytes[9],

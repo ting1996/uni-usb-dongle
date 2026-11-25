@@ -10,6 +10,8 @@ project(uni_usb_dongle VERSION 1.2.0 LANGUAGES C)
 include(CTest)
 
 add_library(dongle_core
+    src/core/a2dp_packetizer.c
+    src/core/a2dp_source.c
     src/core/audio_stream.c
     src/core/device_blocklist.c
     src/core/device_catalog.c
@@ -113,6 +115,24 @@ if(BUILD_TESTING)
         target_compile_options(prefs_codec_test PRIVATE /W4)
     endif()
     add_test(NAME prefs_codec COMMAND prefs_codec_test)
+
+    add_executable(a2dp_packetizer_test tests/a2dp_packetizer_test.c)
+    target_link_libraries(a2dp_packetizer_test PRIVATE dongle_core)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(a2dp_packetizer_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    elseif(MSVC)
+        target_compile_options(a2dp_packetizer_test PRIVATE /W4)
+    endif()
+    add_test(NAME a2dp_packetizer COMMAND a2dp_packetizer_test)
+
+    add_executable(a2dp_source_test tests/a2dp_source_test.c)
+    target_link_libraries(a2dp_source_test PRIVATE dongle_core)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(a2dp_source_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    elseif(MSVC)
+        target_compile_options(a2dp_source_test PRIVATE /W4)
+    endif()
+    add_test(NAME a2dp_source COMMAND a2dp_source_test)
 
     add_executable(hfp_ag_test tests/hfp_ag_test.c)
     target_link_libraries(hfp_ag_test PRIVATE dongle_core)
