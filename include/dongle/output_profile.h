@@ -12,6 +12,13 @@ typedef enum {
     DONGLE_PROFILE_DUALSENSE = 4,
 } dongle_output_profile_t;
 #define DONGLE_PROFILE_COUNT 5U
+
+typedef enum {
+    DONGLE_DS_POLL_250HZ = 0,
+    DONGLE_DS_POLL_500HZ = 1,
+    DONGLE_DS_POLL_750HZ = 2,
+} dongle_dualsense_poll_rate_t;
+#define DONGLE_DS_POLL_RATE_COUNT 3U
 #define DONGLE_OUTPUT_MAX_REPORT 64U
 #define DONGLE_DUALSENSE_USB_INPUT_SIZE 64U
 #define DONGLE_DUALSENSE_USB_OUTPUT_SIZE 48U

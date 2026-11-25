@@ -21,10 +21,12 @@ int main(void)
     CHECK(prefs.boot_profile == DONGLE_PROFILE_GENERIC);
     CHECK(prefs.audio_codec == 0U);
     CHECK(prefs.mic_source == DONGLE_MIC_SOURCE_AUTO);
+    CHECK(prefs.dualsense_poll_rate == DONGLE_DS_POLL_250HZ);
 
     prefs.boot_profile = DONGLE_PROFILE_DUALSENSE;
     prefs.audio_codec = 1U;
     prefs.mic_source = DONGLE_MIC_SOURCE_HEADPHONE;
+    prefs.dualsense_poll_rate = DONGLE_DS_POLL_750HZ;
 
     uint8_t blob[DONGLE_PREFS_BLOB_SIZE];
     CHECK(dongle_prefs_encode(&prefs, blob, sizeof(blob) - 1U) ==
@@ -37,6 +39,7 @@ int main(void)
     CHECK(decoded.boot_profile == DONGLE_PROFILE_DUALSENSE);
     CHECK(decoded.audio_codec == 1U);
     CHECK(decoded.mic_source == DONGLE_MIC_SOURCE_HEADPHONE);
+    CHECK(decoded.dualsense_poll_rate == DONGLE_DS_POLL_750HZ);
 
     /* Corrupt CRC / payload -> rejected without changing decoded. */
     blob[5] ^= 0x01U;
@@ -53,6 +56,15 @@ int main(void)
         CHECK(decoded.audio_codec == c);
     }
 
+    /* Valid DualSense polling rates 0..2 -> accepted by encode/decode. */
+    for (uint8_t r = 0U; r < DONGLE_DS_POLL_RATE_COUNT; ++r) {
+        dongle_prefs_t p = prefs;
+        p.dualsense_poll_rate = r;
+        CHECK(dongle_prefs_encode(&p, blob, sizeof(blob)) == DONGLE_PREFS_OK);
+        CHECK(dongle_prefs_decode(blob, sizeof(blob), &decoded) == DONGLE_PREFS_OK);
+        CHECK(decoded.dualsense_poll_rate == r);
+    }
+
     /* Invalid enum values -> rejected by encode. */
     dongle_prefs_t invalid = prefs;
     invalid.boot_profile = DONGLE_PROFILE_COUNT;
@@ -62,6 +74,9 @@ int main(void)
     CHECK(dongle_prefs_encode(&invalid, blob, sizeof(blob)) == DONGLE_PREFS_INVALID_DATA);
     invalid = prefs;
     invalid.mic_source = DONGLE_MIC_SOURCE_COUNT;
+    CHECK(dongle_prefs_encode(&invalid, blob, sizeof(blob)) == DONGLE_PREFS_INVALID_DATA);
+    invalid = prefs;
+    invalid.dualsense_poll_rate = DONGLE_DS_POLL_RATE_COUNT;
     CHECK(dongle_prefs_encode(&invalid, blob, sizeof(blob)) == DONGLE_PREFS_INVALID_DATA);
 
     puts("Preferences codec tests passed");

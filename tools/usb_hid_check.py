@@ -51,6 +51,8 @@ CMD_BLOCK_DEVICE = 0x26
 CMD_UNBLOCK_DEVICE = 0x27
 PROFILE_NAMES = {0: "generic", 1: "xinput", 2: "ps4", 3: "switch", 4: "dualsense"}
 PROFILE_IDS = {name: idx for idx, name in PROFILE_NAMES.items()}
+DS_POLL_NAMES = {0: "250hz", 1: "500hz", 2: "750hz"}
+DS_POLL_IDS = {name: idx for idx, name in DS_POLL_NAMES.items()}
 CODEC_NAMES = {0: "auto", 1: "sbc", 2: "aac", 3: "ldac", 4: "aptx", 5: "aptx_hd"}
 CODEC_IDS = {name: idx for idx, name in CODEC_NAMES.items()}
 MIC_SOURCE_NAMES = {0: "auto", 1: "headphone", 2: "controller0", 3: "controller1", 4: "off"}
@@ -324,6 +326,11 @@ def decode_profile_state(data):
         "saved_profile_name": PROFILE_NAMES.get(saved_profile, f"unknown({saved_profile})"),
         "persisted": bool(flags & 0x01),
         "two_controller_mode": bool(flags & 0x02),
+        "ds_poll_rate": (flags >> 2) & 0x03,
+        "ds_poll_rate_name": DS_POLL_NAMES.get((flags >> 2) & 0x03, f"unknown({(flags >> 2) & 0x03})"),
+        "requested_ds_poll_rate": (flags >> 4) & 0x03,
+        "requested_ds_poll_rate_name": DS_POLL_NAMES.get((flags >> 4) & 0x03, f"unknown({(flags >> 4) & 0x03})"),
+        "ds_poll_supported": bool(flags & 0x40),
     }
 
 
@@ -334,8 +341,11 @@ def read_profile_state(port, sequence=101, timeout=3.0):
     return decode_profile_state(data)
 
 
-def set_profile(port, profile, codec=0, persist=False, sequence=102, timeout=3.0):
-    payload = bytes((profile, codec, 1)) if persist else bytes((profile, codec))
+def set_profile(port, profile, codec=0, persist=False, ds_poll_rate=None, sequence=102, timeout=3.0):
+    if ds_poll_rate is not None:
+        payload = bytes((profile, codec, 1 if persist else 0, ds_poll_rate))
+    else:
+        payload = bytes((profile, codec, 1)) if persist else bytes((profile, codec))
     data = usb_device_check._request(
         port, CMD_SET_PROFILE, sequence, payload, timeout
     )
@@ -797,6 +807,12 @@ def main():
         help="preferred Bluetooth audio codec when using --set-profile",
     )
     parser.add_argument(
+        "--ds-poll-rate",
+        choices=tuple(DS_POLL_IDS),
+        default=None,
+        help="DualSense USB polling rate when using --set-profile",
+    )
+    parser.add_argument(
         "--mic-config",
         action="store_true",
         help="query Bluetooth microphone routing and decoder metrics (0x22)",
@@ -869,6 +885,7 @@ def main():
                     f"codec={profile['codec_name']}, transition={profile['transition']}, "
                     f"failure={profile['failure']}, profile_mask=0x{profile['profile_mask']:02x}, "
                     f"codec_mask=0x{profile['codec_mask']:02x}"
+                    + (f", ds_poll={profile['ds_poll_rate_name']}" if profile["ds_poll_supported"] else "")
                 )
             if args.set_profile:
                 next_state = set_profile(
@@ -876,12 +893,14 @@ def main():
                     PROFILE_IDS[args.set_profile],
                     CODEC_IDS[args.codec],
                     persist=args.persist,
+                    ds_poll_rate=DS_POLL_IDS[args.ds_poll_rate] if args.ds_poll_rate else None,
                     sequence=102,
                 )
                 print(
                     f"Profile switch requested: active={next_state['active_name']}, "
                     f"requested={next_state['requested_name']}, persisted={next_state['persisted']}, "
                     f"transition={next_state['transition']}"
+                    + (f", ds_poll={next_state['requested_ds_poll_rate_name']}" if next_state["ds_poll_supported"] else "")
                 )
             if args.mic_config or args.set_mic_source:
                 if args.set_mic_source:

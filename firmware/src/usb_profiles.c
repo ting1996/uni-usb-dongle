@@ -8,6 +8,7 @@
 #include <string.h>
 
 static volatile uint8_t active, requested, codec_requested, transition, failure;
+static volatile uint8_t active_ds_poll, requested_ds_poll;
 static volatile uint8_t saved_default;
 static volatile bool persisted_default;
 static volatile uint8_t active_gamepads = 1U, desired_gamepads = 1U;
@@ -104,7 +105,18 @@ static void apply_device_identity(uint8_t profile)
     device_descriptor[13] = (uint8_t)(bcd >> 8U);
 }
 
-void dongle_usb_profile_init(uint8_t saved_profile, uint8_t saved_codec)
+static uint8_t dualsense_ep_interval(bool hs, uint8_t poll_rate)
+{
+    if (poll_rate == DONGLE_DS_POLL_500HZ) {
+        return (uint8_t)(hs ? 5U : 2U);
+    }
+    if (poll_rate == DONGLE_DS_POLL_750HZ) {
+        return (uint8_t)(hs ? 4U : 1U);
+    }
+    return (uint8_t)(hs ? 6U : 4U);
+}
+
+void dongle_usb_profile_init(uint8_t saved_profile, uint8_t saved_codec, uint8_t saved_ds_poll_rate)
 {
     if (saved_profile < DONGLE_PROFILE_COUNT) {
         active = saved_profile;
@@ -117,6 +129,10 @@ void dongle_usb_profile_init(uint8_t saved_profile, uint8_t saved_codec)
         saved_default = DONGLE_PROFILE_GENERIC;
         persisted_default = false;
     }
+    const uint8_t init_poll = saved_ds_poll_rate < DONGLE_DS_POLL_RATE_COUNT
+        ? saved_ds_poll_rate : (uint8_t)DONGLE_DS_POLL_250HZ;
+    active_ds_poll = init_poll;
+    requested_ds_poll = init_poll;
     codec_requested = saved_codec < DONGLE_AUDIO_CODEC_COUNT ? saved_codec : 0U;
     dongle_bluetooth_set_audio_codec(codec_requested);
     transition = 0U;
@@ -125,6 +141,8 @@ void dongle_usb_profile_init(uint8_t saved_profile, uint8_t saved_codec)
 }
 
 dongle_output_profile_t dongle_usb_profile(void) { return active; }
+dongle_dualsense_poll_rate_t dongle_usb_profile_dualsense_poll_rate(void)
+{ return (dongle_dualsense_poll_rate_t)active_ds_poll; }
 uint8_t dongle_usb_profile_gamepad_count(void) { return active_gamepads == 2U ? 2U : 1U; }
 uint8_t dongle_usb_profile_gamepad_first_interface(void) { return 3U; }
 uint8_t dongle_usb_profile_mgmt_interface(void)
@@ -159,24 +177,38 @@ bool dongle_usb_profile_set_connected_controllers(uint8_t connected_mask)
     }
     return transition == 1;
 }
-uint8_t dongle_usb_profile_request(uint8_t profile, uint8_t codec, bool persist)
+uint8_t dongle_usb_profile_request(uint8_t profile, uint8_t codec, bool persist, uint8_t ds_poll_rate)
 {
-    if (profile >= DONGLE_PROFILE_COUNT || codec >= DONGLE_AUDIO_CODEC_COUNT) return 1;
+    if (profile >= DONGLE_PROFILE_COUNT || codec >= DONGLE_AUDIO_CODEC_COUNT ||
+        (ds_poll_rate != 0xffU && ds_poll_rate >= DONGLE_DS_POLL_RATE_COUNT)) {
+        return 1;
+    }
     if (transition == 1 || transition == 2) return 3;
     requested = profile; codec_requested = codec; failure = 0;
+    if (ds_poll_rate != 0xffU) {
+        requested_ds_poll = ds_poll_rate;
+    }
     dongle_bluetooth_set_audio_codec(codec_requested);
     if (persist) {
         saved_default = profile;
         persisted_default = true;
     }
-    transition = (active == requested && active_gamepads == desired_gamepads) ? 0 : 1;
+    const bool poll_changed =
+        requested == DONGLE_PROFILE_DUALSENSE && active_ds_poll != requested_ds_poll;
+    transition = (active == requested && active_gamepads == desired_gamepads && !poll_changed) ? 0 : 1;
+    if (transition == 0U) {
+        active_ds_poll = requested_ds_poll;
+    }
     apply_at = xTaskGetTickCount() + pdMS_TO_TICKS(300);
     return 0;
 }
 size_t dongle_usb_profile_state(uint8_t out[12])
 {
     const uint8_t flags = (uint8_t)((persisted_default ? 0x01U : 0U) |
-                                    (active_gamepads == 2U ? 0x02U : 0U));
+                                    (active_gamepads == 2U ? 0x02U : 0U) |
+                                    ((active_ds_poll & 0x03U) << 2U) |
+                                    ((requested_ds_poll & 0x03U) << 4U) |
+                                    0x40U);
     const uint8_t active_codec = dongle_bluetooth_active_audio_codec();
     const uint8_t state[12] = {0,1,active,requested,0x1f,codec_requested,
         active_codec,DONGLE_AUDIO_CODEC_MASK,transition,failure,
@@ -190,6 +222,7 @@ void dongle_usb_profile_complete(bool success)
 void dongle_usb_profile_activate(void)
 {
     transition = 2; active = requested;
+    active_ds_poll = requested_ds_poll;
     active_gamepads = desired_gamepads == 2U ? 2U : 1U;
     apply_device_identity(active);
 }
@@ -222,11 +255,14 @@ const uint8_t *dongle_usb_profile_config(uint8_t speed, bool other_speed)
             memcpy(out + n, xusb, sizeof(xusb)); n += sizeof(xusb);
         } else {
             bool extra = active != DONGLE_PROFILE_GENERIC;
+            const uint8_t ep_interval = active == DONGLE_PROFILE_DUALSENSE
+                ? dualsense_ep_interval(hs, active_ds_poll)
+                : (uint8_t)(hs ? 6 : 4);
             const uint8_t hid[] = {
                 9,4,intf_num,0,(uint8_t)(extra ? 2 : 1),3,0,0,0,
                 9,0x21,0x11,1,0,1,0x22,(uint8_t)(length & 255U),(uint8_t)(length >> 8U),
-                7,5,ep_in,3,(uint8_t)(extra ? 64 : 10),0,(uint8_t)(hs ? 6 : 4),
-                7,5,ep_out,3,64,0,(uint8_t)(hs ? 6 : 4)
+                7,5,ep_in,3,(uint8_t)(extra ? 64 : 10),0,ep_interval,
+                7,5,ep_out,3,64,0,ep_interval
             };
             size_t size = sizeof(hid) - (extra ? 0U : 7U);
             memcpy(out + n, hid, size); n += size;

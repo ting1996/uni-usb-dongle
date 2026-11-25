@@ -48,6 +48,20 @@ export const OUTPUT_PROFILE = Object.freeze({
   dualsense: 4,
 });
 
+export const DUALSENSE_POLL_RATE = Object.freeze({
+  hz250: 0,
+  hz500: 1,
+  hz750: 2,
+});
+
+export function dualsensePollRateLabel(rateId) {
+  return ({
+    [DUALSENSE_POLL_RATE.hz250]: "250 Hz",
+    [DUALSENSE_POLL_RATE.hz500]: "500 Hz",
+    [DUALSENSE_POLL_RATE.hz750]: "750 Hz",
+  })[rateId] || `Rate ${rateId}`;
+}
+
 export const AUDIO_CODEC = Object.freeze({
   auto: 0,
   sbc: 1,
@@ -194,6 +208,8 @@ export function parseProfileState(bytes) {
   }
   const savedProfile = bytes.length >= 11 ? bytes[10] : 0;
   const flags = bytes.length >= 12 ? bytes[11] : 0;
+  const dsPollRate = (flags >> 2) & 0x03;
+  const requestedDsPollRate = (flags >> 4) & 0x03;
   return {
     version: bytes[1],
     active: bytes[2],
@@ -212,6 +228,11 @@ export function parseProfileState(bytes) {
     savedProfileLabel: profileLabel(savedProfile),
     persisted: Boolean(flags & 0x01),
     twoControllerMode: Boolean(flags & 0x02),
+    dsPollRate,
+    dsPollRateLabel: dualsensePollRateLabel(dsPollRate),
+    requestedDsPollRate,
+    requestedDsPollRateLabel: dualsensePollRateLabel(requestedDsPollRate),
+    dsPollSupported: Boolean(flags & 0x40),
   };
 }
 

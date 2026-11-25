@@ -145,11 +145,27 @@ class HidCheckTests(unittest.TestCase):
     def test_decode_mic_state_blocklist_and_profile_v11(self):
         import struct
 
-        prof = usb_hid_check.decode_profile_state(bytes([0, 1, 4, 4, 0x1F, 1, 0xFF, 3, 0, 0, 4, 0x03]))
+        prof = usb_hid_check.decode_profile_state(bytes([0, 1, 4, 4, 0x1F, 1, 0xFF, 3, 0, 0, 4, 0x67]))
         self.assertEqual(prof["saved_profile"], 4)
         self.assertEqual(prof["saved_profile_name"], "dualsense")
         self.assertTrue(prof["persisted"])
         self.assertTrue(prof["two_controller_mode"])
+        self.assertTrue(prof["ds_poll_supported"])
+        self.assertEqual(prof["ds_poll_rate"], 1)
+        self.assertEqual(prof["ds_poll_rate_name"], "500hz")
+        self.assertEqual(prof["requested_ds_poll_rate"], 2)
+        self.assertEqual(prof["requested_ds_poll_rate_name"], "750hz")
+
+        from unittest import mock
+        with mock.patch.object(
+            usb_hid_check.usb_device_check,
+            "_request",
+            return_value=bytes([0, 1, 4, 4, 0x1F, 0, 0xFF, 0x3F, 1, 0, 4, 0x6B]),
+        ) as req_mock:
+            usb_hid_check.set_profile(None, 4, 0, persist=True, ds_poll_rate=2)
+            self.assertEqual(req_mock.call_args.args[3], bytes([4, 0, 1, 2]))
+            usb_hid_check.set_profile(None, 4, 0, persist=False)
+            self.assertEqual(req_mock.call_args.args[3], bytes([4, 0]))
 
         mic_bytes = bytearray(16)
         mic_bytes[1] = 2

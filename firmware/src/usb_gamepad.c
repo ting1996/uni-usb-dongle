@@ -91,6 +91,8 @@ static uint8_t idle_rate[DONGLE_USB_GAMEPAD_COUNT];
 static uint8_t tx_counter[DONGLE_USB_GAMEPAD_COUNT];
 static uint32_t ds_pkt_seq[DONGLE_USB_GAMEPAD_COUNT];
 static uint32_t ds_sensor_ts[DONGLE_USB_GAMEPAD_COUNT];
+static uint8_t ds_poll_phase[DONGLE_USB_GAMEPAD_COUNT];
+static bool ds_first_sent[DONGLE_USB_GAMEPAD_COUNT];
 static volatile bool switch_streaming[DONGLE_USB_GAMEPAD_COUNT];
 static volatile bool switch_reply_pending[DONGLE_USB_GAMEPAD_COUNT];
 static uint8_t switch_reply_buf[DONGLE_USB_GAMEPAD_COUNT][64];
@@ -183,6 +185,29 @@ static void put_le32(uint8_t *p, uint32_t value)
     p[3] = (uint8_t)(value >> 24U);
 }
 
+static TickType_t ds_poll_min_gap_ticks(dongle_dualsense_poll_rate_t rate,
+                                        uint8_t phase)
+{
+    if (rate == DONGLE_DS_POLL_500HZ) {
+        return pdMS_TO_TICKS(2U);
+    }
+    if (rate == DONGLE_DS_POLL_750HZ) {
+        return phase == 2U ? pdMS_TO_TICKS(2U) : pdMS_TO_TICKS(1U);
+    }
+    return pdMS_TO_TICKS(4U);
+}
+
+static uint32_t ds_sensor_ts_step(dongle_dualsense_poll_rate_t rate)
+{
+    if (rate == DONGLE_DS_POLL_500HZ) {
+        return 6000U;
+    }
+    if (rate == DONGLE_DS_POLL_750HZ) {
+        return 4000U;
+    }
+    return 12000U;
+}
+
 static size_t encode_gamepad_report(
     uint8_t slot, dongle_output_profile_t profile, uint8_t out[64])
 {
@@ -196,7 +221,8 @@ static size_t encode_gamepad_report(
     if (profile == DONGLE_PROFILE_DUALSENSE && len == 64U) {
         put_le32(&out[12], ds_pkt_seq[slot]++);
         put_le32(&out[28], ds_sensor_ts[slot]);
-        ds_sensor_ts[slot] += 12000U;
+        ds_sensor_ts[slot] +=
+            ds_sensor_ts_step(dongle_usb_profile_dualsense_poll_rate());
         out[54] = 0x08U;
     }
     return len;
@@ -410,6 +436,8 @@ static void gamepad_task(void *argument)
         taskENTER_CRITICAL();
         const TickType_t now = xTaskGetTickCount();
         const dongle_output_profile_t profile = dongle_usb_profile();
+        const dongle_dualsense_poll_rate_t ds_poll =
+            dongle_usb_profile_dualsense_poll_rate();
         const uint8_t gamepad_count = active_gamepad_count();
         if (reset_pending) {
             for (uint8_t i = 0; i < DONGLE_USB_GAMEPAD_COUNT; ++i) {
@@ -419,6 +447,8 @@ static void gamepad_task(void *argument)
                 tx_counter[i] = 0;
                 ds_pkt_seq[i] = 0U;
                 ds_sensor_ts[i] = 10200000U;
+                ds_poll_phase[i] = 0U;
+                ds_first_sent[i] = false;
                 switch_streaming[i] = false;
                 switch_reply_pending[i] = false;
                 raw_ds_valid[i] = false;
@@ -511,9 +541,18 @@ static void gamepad_task(void *argument)
                     continue;
                 }
             }
-            const bool ds_periodic_due = profile == DONGLE_PROFILE_DUALSENSE &&
-                (!raw_ds_valid[i] ||
-                 (TickType_t)(now - last_sent[i]) >= pdMS_TO_TICKS(12U));
+            bool ds_periodic_due = false;
+            if (profile == DONGLE_PROFILE_DUALSENSE) {
+                const bool ds_pace_ready = !ds_first_sent[i] ||
+                    (TickType_t)(now - last_sent[i]) >=
+                        ds_poll_min_gap_ticks(ds_poll, ds_poll_phase[i]);
+                if (!ds_pace_ready) {
+                    continue;
+                }
+                ds_periodic_due = ds_poll != DONGLE_DS_POLL_250HZ ||
+                    !raw_ds_valid[i] ||
+                    (TickType_t)(now - last_sent[i]) >= pdMS_TO_TICKS(12U);
+            }
             if (!pending[i] && !idle_due && !ds_periodic_due) {
                 continue;
             }
@@ -528,12 +567,20 @@ static void gamepad_task(void *argument)
                 ++submitted[i];
                 ++tx_counter[i];
                 last_sent[i] = now;
+                ds_first_sent[i] = true;
+                ds_poll_phase[i] = (profile == DONGLE_PROFILE_DUALSENSE &&
+                                    ds_poll == DONGLE_DS_POLL_750HZ)
+                    ? (uint8_t)((ds_poll_phase[i] + 1U) % 3U)
+                    : 0U;
             } else {
                 busy[i] = false;
             }
         }
+        const uint32_t delay_ms =
+            (profile == DONGLE_PROFILE_DUALSENSE &&
+             ds_poll != DONGLE_DS_POLL_250HZ) ? 1U : 4U;
         taskEXIT_CRITICAL();
-        vTaskDelay(pdMS_TO_TICKS(4U));
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
 }
 
@@ -703,6 +750,8 @@ void dongle_usb_gamepad_attach(uint8_t busid)
         switch_streaming[i] = false;
         switch_reply_pending[i] = false;
         raw_ds_valid[i] = false;
+        ds_poll_phase[i] = 0U;
+        ds_first_sent[i] = false;
         tx_counter[i] = 0U;
         if (profile == DONGLE_PROFILE_XINPUT) {
             memset(&interfaces[i], 0, sizeof(interfaces[i]));

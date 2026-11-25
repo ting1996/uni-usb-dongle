@@ -18,6 +18,7 @@ import {
   parseMicState,
   parseProfileState,
   parseRadioState,
+  dualsensePollRateLabel,
   profileLabel,
   profileVidPid,
   validateOtaImage,
@@ -55,6 +56,7 @@ const elements = {
   profileTransitionBadge: el("profileTransitionBadge"),
   profileCards: Array.from(document.querySelectorAll("#profileCards .profile-option")),
   codecSelect: el("codecSelect"),
+  dsPollRateSelect: el("dsPollRateSelect"),
   persistProfileCheckbox: el("persistProfileCheckbox"),
   applyProfileBtn: el("applyProfileBtn"),
   profileStatusNote: el("profileStatusNote"),
@@ -231,6 +233,7 @@ function syncUiEnabled() {
     card.disabled = !canControl || !snapshot.profileState;
   }
   elements.codecSelect.disabled = !canControl || !snapshot.profileState;
+  elements.dsPollRateSelect.disabled = !canControl || !snapshot.profileState || !snapshot.profileState.dsPollSupported;
   elements.persistProfileCheckbox.disabled = !canControl || !snapshot.profileState;
   elements.applyProfileBtn.disabled = !canControl || !snapshot.profileState;
 
@@ -358,15 +361,18 @@ function renderOverviewAndProfile() {
     const bootBadge = profile.persisted
       ? `Boot default: ${profile.savedProfileLabel}`
       : "Session default: Generic HID";
+    const pollSuffix = profile.active === OUTPUT_PROFILE.dualsense && profile.dsPollSupported
+      ? ` · ${profile.dsPollRateLabel}`
+      : "";
     elements.headerProfilePill.textContent = `${profile.activeLabel} (${vidPid})`;
     elements.overviewProfileName.textContent = profile.activeLabel;
     elements.overviewProfileMeta.textContent =
-      `USB ${vidPid} · ${bootBadge} · ${profile.twoControllerMode ? "2-Controller mode" : "1-Controller mode"}`;
+      `USB ${vidPid}${pollSuffix} · ${bootBadge} · ${profile.twoControllerMode ? "2-Controller mode" : "1-Controller mode"}`;
 
     const trLabels = ["Idle", "Switching...", "Applying...", "Failed"];
     elements.profileTransitionBadge.textContent = trLabels[profile.transition] || `State ${profile.transition}`;
     elements.profileStatusNote.textContent =
-      `Active: ${profile.activeLabel} (${vidPid}). Saved boot default: ${profile.persisted ? profile.savedProfileLabel : "None (defaults to Generic HID)"}.`;
+      `Active: ${profile.activeLabel} (${vidPid})${pollSuffix}. Saved boot default: ${profile.persisted ? profile.savedProfileLabel : "None (defaults to Generic HID)"}.`;
   } else {
     elements.headerProfilePill.textContent = "Profile: v1.0 firmware";
     elements.overviewProfileName.textContent = "Generic HID";
@@ -850,6 +856,7 @@ async function refreshAll() {
     snapshot.profileState = parseProfileState(profRaw);
     updateProfileCardSelection(snapshot.profileState.requested);
     elements.codecSelect.value = String(snapshot.profileState.codec <= 5 ? snapshot.profileState.codec : 0);
+    elements.dsPollRateSelect.value = String(snapshot.profileState.requestedDsPollRate <= 2 ? snapshot.profileState.requestedDsPollRate : 0);
   } else {
     snapshot.profileState = null;
   }
@@ -937,16 +944,21 @@ async function handleApplyProfile() {
   const targetProfile = selectedProfileChoice;
   const codec = Number(elements.codecSelect.value);
   const persist = elements.persistProfileCheckbox.checked ? 1 : 0;
-  const sameProfile = snapshot.profileState.active === targetProfile;
+  const dsPollRate = Number(elements.dsPollRateSelect.value);
+  const dsPollSupported = Boolean(snapshot.profileState.dsPollSupported);
+  const sameProfile = snapshot.profileState.active === targetProfile &&
+    (!dsPollSupported || targetProfile !== OUTPUT_PROFILE.dualsense ||
+     snapshot.profileState.dsPollRate === dsPollRate);
 
-  const reply = await sendChecked(
-    COMMAND.setProfile,
-    Uint8Array.of(targetProfile, codec, persist),
-  );
+  const payload = dsPollSupported
+    ? Uint8Array.of(targetProfile, codec, persist, dsPollRate)
+    : Uint8Array.of(targetProfile, codec, persist);
+  const reply = await sendChecked(COMMAND.setProfile, payload);
   const updated = parseProfileState(reply);
   snapshot.profileState = updated;
   appendLog(
-    `Profile requested: ${profileLabel(targetProfile)} (${profileVidPid(targetProfile)}), persist=${Boolean(persist)}`,
+    `Profile requested: ${profileLabel(targetProfile)} (${profileVidPid(targetProfile)}), persist=${Boolean(persist)}` +
+    (dsPollSupported ? `, dsPoll=${dualsensePollRateLabel(dsPollRate)}` : ""),
   );
 
   if (sameProfile && updated.transition === 0) {

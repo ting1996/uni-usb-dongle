@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import {
   COMMAND,
   OUTPUT_PROFILE,
+  DUALSENSE_POLL_RATE,
   MIC_SOURCE,
   MIC_CODEC,
   addressBytes,
+  dualsensePollRateLabel,
   parseDiscoveryResult,
   parseRadioState,
   headphoneStatus,
@@ -73,6 +75,16 @@ test("Profile state and audio metrics commands decode firmware payloads", () => 
   assert.equal(profile.savedProfile, OUTPUT_PROFILE.dualsense);
   assert.equal(profile.persisted, true);
   assert.equal(profile.twoControllerMode, true);
+  assert.equal(profile.dsPollSupported, false);
+  assert.equal(profile.dsPollRate, DUALSENSE_POLL_RATE.hz250);
+  assert.equal(dualsensePollRateLabel(DUALSENSE_POLL_RATE.hz750), "750 Hz");
+
+  const pollProfileBytes = Uint8Array.of(0, 1, OUTPUT_PROFILE.dualsense, OUTPUT_PROFILE.dualsense, 0x1f, 0, 0xff, 0x3f, 0, 0, OUTPUT_PROFILE.dualsense, 0x69);
+  const pollProfile = parseProfileState(pollProfileBytes);
+  assert.equal(pollProfile.dsPollSupported, true);
+  assert.equal(pollProfile.dsPollRate, DUALSENSE_POLL_RATE.hz750);
+  assert.equal(pollProfile.dsPollRateLabel, "750 Hz");
+  assert.equal(pollProfile.requestedDsPollRate, DUALSENSE_POLL_RATE.hz750);
   assert.throws(() => parseProfileState(Uint8Array.of(2)));
 
   const metricsBytes = new Uint8Array(12);

@@ -14,7 +14,8 @@ static bool prefs_is_valid(const dongle_prefs_t *prefs)
     return prefs != NULL &&
            prefs->boot_profile < DONGLE_PROFILE_COUNT &&
            prefs->audio_codec < DONGLE_AUDIO_CODEC_COUNT &&
-           prefs->mic_source < DONGLE_MIC_SOURCE_COUNT;
+           prefs->mic_source < DONGLE_MIC_SOURCE_COUNT &&
+           prefs->dualsense_poll_rate < DONGLE_DS_POLL_RATE_COUNT;
 }
 
 dongle_prefs_result_t dongle_prefs_init_defaults(dongle_prefs_t *prefs)
@@ -25,6 +26,7 @@ dongle_prefs_result_t dongle_prefs_init_defaults(dongle_prefs_t *prefs)
     prefs->boot_profile = (uint8_t)DONGLE_PROFILE_GENERIC;
     prefs->audio_codec = 0U;
     prefs->mic_source = (uint8_t)DONGLE_MIC_SOURCE_AUTO;
+    prefs->dualsense_poll_rate = (uint8_t)DONGLE_DS_POLL_250HZ;
     return DONGLE_PREFS_OK;
 }
 
@@ -46,6 +48,7 @@ dongle_prefs_result_t dongle_prefs_encode(
     buffer[5] = prefs->boot_profile;
     buffer[6] = prefs->audio_codec;
     buffer[7] = prefs->mic_source;
+    buffer[8] = prefs->dualsense_poll_rate;
     dongle_codec_write_le32(&buffer[PREFS_CRC_OFFSET],
                             dongle_codec_crc32(buffer, PREFS_CRC_OFFSET));
     return DONGLE_PREFS_OK;
@@ -70,6 +73,7 @@ dongle_prefs_result_t dongle_prefs_decode(
         .boot_profile = buffer[5],
         .audio_codec = buffer[6],
         .mic_source = buffer[7],
+        .dualsense_poll_rate = buffer[8],
     };
     if (!prefs_is_valid(&decoded)) {
         return DONGLE_PREFS_INVALID_DATA;

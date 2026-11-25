@@ -8,14 +8,15 @@ struct usb_msosv1_descriptor;
 #define DONGLE_MANAGEMENT_INTERFACE 4U
 #define DONGLE_MANAGEMENT_EP 0x85U
 /* Both controller slots share one USB personality. */
-void dongle_usb_profile_init(uint8_t saved_profile, uint8_t saved_codec);
+void dongle_usb_profile_init(uint8_t saved_profile, uint8_t saved_codec, uint8_t saved_ds_poll_rate);
 dongle_output_profile_t dongle_usb_profile(void);
+dongle_dualsense_poll_rate_t dongle_usb_profile_dualsense_poll_rate(void);
 uint8_t dongle_usb_profile_gamepad_count(void);
 uint8_t dongle_usb_profile_gamepad_first_interface(void);
 uint8_t dongle_usb_profile_mgmt_interface(void);
 uint8_t dongle_usb_profile_gamepad_out_ep(uint8_t slot);
 bool dongle_usb_profile_set_connected_controllers(uint8_t connected_mask);
-uint8_t dongle_usb_profile_request(uint8_t profile, uint8_t codec, bool persist);
+uint8_t dongle_usb_profile_request(uint8_t profile, uint8_t codec, bool persist, uint8_t ds_poll_rate);
 size_t dongle_usb_profile_state(uint8_t out[12]);
 bool dongle_usb_profile_pending(void);
 void dongle_usb_profile_activate(void);

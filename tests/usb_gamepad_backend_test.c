@@ -18,6 +18,7 @@ void dongle_usb_hid_get_feature(uint8_t *data)
 { memcpy(data, feature_data, sizeof(feature_data)); }
 
 static dongle_output_profile_t test_profile = DONGLE_PROFILE_GENERIC;
+static dongle_dualsense_poll_rate_t test_ds_poll_rate = DONGLE_DS_POLL_250HZ;
 static uint8_t test_gamepad_count = DONGLE_USB_GAMEPAD_COUNT;
 static uint8_t test_local_mac[6] = { 0xb4, 0x0e, 0xcf, 0x35, 0x9b, 0xc8 };
 static bool mock_ds_feat_enabled;
@@ -34,6 +35,7 @@ static uint8_t bt_ds_feat_slot;
 static uint8_t bt_ds_feat_buf[64];
 static uint32_t bt_ds_feat_len;
 dongle_output_profile_t dongle_usb_profile(void) { return test_profile; }
+dongle_dualsense_poll_rate_t dongle_usb_profile_dualsense_poll_rate(void) { return test_ds_poll_rate; }
 uint8_t dongle_usb_profile_gamepad_count(void) { return test_gamepad_count; }
 uint8_t dongle_usb_profile_gamepad_first_interface(void) { return 3U; }
 uint8_t dongle_usb_profile_mgmt_interface(void)
@@ -498,6 +500,66 @@ int main(void)
     complete_both();
     usbd_hid_get_report(0, 4U, 0x05U, 3U, &control_ptr, &length);
     CHECK(length == 0U);
+
+    /* DualSense 250 Hz, 500 Hz, and 750 Hz polling cadence and sensor timestamp steps. */
+    test_profile = DONGLE_PROFILE_DUALSENSE;
+    test_gamepad_count = 1U;
+
+    test_ds_poll_rate = DONGLE_DS_POLL_250HZ;
+    dongle_usb_gamepad_attach(0);
+    dongle_usb_gamepad_event(USBD_EVENT_CONFIGURED);
+    const unsigned ds250_start = sends[0];
+    poll_at(600);
+    CHECK(sends[0] == ds250_start + 1U);
+    const uint32_t ts250_0 = (uint32_t)sent[0][28] | ((uint32_t)sent[0][29] << 8U) |
+                             ((uint32_t)sent[0][30] << 16U) | ((uint32_t)sent[0][31] << 24U);
+    complete_both();
+    poll_at(603);
+    CHECK(sends[0] == ds250_start + 1U); /* 250 Hz pace gate blocks < 4 ms. */
+    poll_at(612);
+    CHECK(sends[0] == ds250_start + 2U);
+    const uint32_t ts250_1 = (uint32_t)sent[0][28] | ((uint32_t)sent[0][29] << 8U) |
+                             ((uint32_t)sent[0][30] << 16U) | ((uint32_t)sent[0][31] << 24U);
+    CHECK(ts250_1 - ts250_0 == 12000U);
+    complete_both();
+
+    test_ds_poll_rate = DONGLE_DS_POLL_500HZ;
+    dongle_usb_gamepad_attach(0);
+    dongle_usb_gamepad_event(USBD_EVENT_CONFIGURED);
+    const unsigned ds500_start = sends[0];
+    uint32_t ts500_prev = 0U;
+    for (TickType_t t = 1000; t < 2000; ++t) {
+        poll_at(t);
+        if (sends[0] == ds500_start + 1U && ts500_prev == 0U) {
+            ts500_prev = (uint32_t)sent[0][28] | ((uint32_t)sent[0][29] << 8U) |
+                         ((uint32_t)sent[0][30] << 16U) | ((uint32_t)sent[0][31] << 24U);
+        } else if (sends[0] == ds500_start + 2U) {
+            const uint32_t ts500_next = (uint32_t)sent[0][28] | ((uint32_t)sent[0][29] << 8U) |
+                                        ((uint32_t)sent[0][30] << 16U) | ((uint32_t)sent[0][31] << 24U);
+            CHECK(ts500_next - ts500_prev == 6000U);
+        }
+        complete_both();
+    }
+    CHECK(sends[0] - ds500_start == 500U);
+
+    test_ds_poll_rate = DONGLE_DS_POLL_750HZ;
+    dongle_usb_gamepad_attach(0);
+    dongle_usb_gamepad_event(USBD_EVENT_CONFIGURED);
+    const unsigned ds750_start = sends[0];
+    uint32_t ts750_prev = 0U;
+    for (TickType_t t = 2000; t < 3000; ++t) {
+        poll_at(t);
+        if (sends[0] == ds750_start + 1U && ts750_prev == 0U) {
+            ts750_prev = (uint32_t)sent[0][28] | ((uint32_t)sent[0][29] << 8U) |
+                         ((uint32_t)sent[0][30] << 16U) | ((uint32_t)sent[0][31] << 24U);
+        } else if (sends[0] == ds750_start + 2U) {
+            const uint32_t ts750_next = (uint32_t)sent[0][28] | ((uint32_t)sent[0][29] << 8U) |
+                                        ((uint32_t)sent[0][30] << 16U) | ((uint32_t)sent[0][31] << 24U);
+            CHECK(ts750_next - ts750_prev == 4000U);
+        }
+        complete_both();
+    }
+    CHECK(sends[0] - ds750_start == 750U);
 
     puts("USB gamepad backend tests passed");
     return 0;

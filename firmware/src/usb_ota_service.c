@@ -807,14 +807,16 @@ static void usb_ota_task(void *argument)
             if (session.handle != NULL) {
                 reply[0] = DONGLE_USB_OTA_STATUS_BUSY;
                 (void)send_response_payload(&frame, reply, 1U);
-            } else if (frame.payload_size != 2U && frame.payload_size != 3U) {
+            } else if (frame.payload_size < 2U || frame.payload_size > 4U) {
                 reply[0] = DONGLE_USB_OTA_STATUS_INVALID_FRAME;
                 (void)send_response_payload(&frame, reply, 1U);
             } else {
-                const bool persist = frame.payload_size == 3U &&
+                const bool persist = frame.payload_size >= 3U &&
                                      (frame.payload[2] & 0x01U) != 0U;
+                const uint8_t ds_poll = frame.payload_size == 4U
+                    ? frame.payload[3] : 0xffU;
                 const uint8_t rc = dongle_usb_profile_request(
-                    frame.payload[0], frame.payload[1], persist);
+                    frame.payload[0], frame.payload[1], persist, ds_poll);
                 if (rc != DONGLE_USB_OTA_STATUS_OK) {
                     reply[0] = rc;
                     (void)send_response_payload(&frame, reply, 1U);
@@ -823,6 +825,9 @@ static void usb_ota_task(void *argument)
                         xSemaphoreTake(device_catalog_mutex, portMAX_DELAY) == pdTRUE) {
                         saved_prefs.boot_profile = frame.payload[0];
                         saved_prefs.audio_codec = frame.payload[1];
+                        if (ds_poll != 0xffU) {
+                            saved_prefs.dualsense_poll_rate = ds_poll;
+                        }
                         (void)save_prefs();
                         (void)xSemaphoreGive(device_catalog_mutex);
                     }
@@ -1130,7 +1135,8 @@ BaseType_t dongle_usb_ota_service_start(
     load_blocklist();
     dongle_usb_profile_init(
         has_saved_prefs ? saved_prefs.boot_profile : 0xffU,
-        saved_prefs.audio_codec);
+        saved_prefs.audio_codec,
+        saved_prefs.dualsense_poll_rate);
     dongle_bluetooth_bind_blocklist(&device_blocklist);
 
     int radio_error = dongle_bluetooth_start(catalog, settings_store, device_catalog_mutex);
