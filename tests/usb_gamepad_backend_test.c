@@ -489,6 +489,13 @@ int main(void)
     CHECK(bt_ds_out_count == 3U && bt_ds_out_buf[3] == 0x77U && (bt_ds_out_path_flags & 0x04U) != 0U);
     CHECK(rx_busy[0] && reads[0] == before_reads_0 + 2U); /* Immediately re-armed! */
     complete_both();
+    const uint8_t prev_counter = sent[0][7];
+    poll_at(504);
+    CHECK(sends[0] == before_sends_0 + 2U && last_send_len[0] == 64U &&
+          sent[0][0] == 1U && sent[0][7] == (uint8_t)(prev_counter + 1U) &&
+          (sent[0][28] | sent[0][29] | sent[0][30] | sent[0][31]) != 0U &&
+          sent[0][54] == 0x08U);
+    complete_both();
     usbd_hid_get_report(0, 4U, 0x05U, 3U, &control_ptr, &length);
     CHECK(length == 0U);
 

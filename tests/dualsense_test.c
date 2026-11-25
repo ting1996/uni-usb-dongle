@@ -179,6 +179,48 @@ int main(void)
     dongle_dualsense_normalize_usb_output(norm_v2, 0x0402U);
     CHECK(norm_v2[1] == 0x02U && norm_v2[39] == 0x04U);
 
+    /* Steam Input style 0x0E (HAPTICS_SELECT + triggers, no compat bit). */
+    uint8_t steam_new[48] = { 0x02U, 0x0EU, 0x55U, 0x80U, 0x80U };
+    dongle_dualsense_normalize_usb_output(steam_new, 0x0402U);
+    CHECK(steam_new[1] == 0x0EU && (steam_new[39] & 0x04U) == 0x04U);
+    uint8_t steam_unk[48] = { 0x02U, 0x0EU, 0x55U, 0x80U, 0x80U };
+    steam_unk[39] = 0x04U;
+    dongle_dualsense_normalize_usb_output(steam_unk, 0x0000U);
+    CHECK(steam_unk[1] == 0x0FU && (steam_unk[39] & 0x04U) == 0x00U);
+    uint8_t steam_unk2[48] = { 0x02U, 0x0EU, 0x55U, 0x80U, 0x80U };
+    dongle_dualsense_normalize_usb_output(steam_unk2, 0x0000U);
+    CHECK(steam_unk2[1] == 0x0FU && (steam_unk2[39] & 0x04U) == 0x00U);
+    uint8_t raw_motor[48] = { 0x02U, 0x00U, 0x00U, 0x80U, 0x00U };
+    dongle_dualsense_normalize_usb_output(raw_motor, 0x0000U);
+    CHECK(raw_motor[1] == 0x03U);
+    uint8_t raw_motor2[48] = { 0x02U, 0x00U, 0x00U, 0x80U, 0x00U };
+    dongle_dualsense_normalize_usb_output(raw_motor2, 0x0402U);
+    CHECK(raw_motor2[1] == 0x02U && raw_motor2[39] == 0x04U);
+    uint8_t led_only[48] = { 0x02U, 0x04U, 0x04U };
+    dongle_dualsense_normalize_usb_output(led_only, 0x0402U);
+    CHECK(led_only[1] == 0x04U && led_only[39] == 0x00U);
+
+    /* A sub-interval stop must not erase an unsent non-zero rumble pulse. */
+    uint8_t co_dst[48] = { 0x02U, 0x02U, 0x00U, 0x60U, 0xA0U };
+    co_dst[39] = 0x04U;
+    uint8_t co_stop[48] = { 0x02U, 0x0EU, 0x04U, 0x00U, 0x00U };
+    co_stop[45] = 0x11U;
+    bool defer_stop = false;
+    dongle_dualsense_merge_usb_output_coalesced(co_dst, co_stop, &defer_stop);
+    CHECK(defer_stop && co_dst[3] == 0x60U && co_dst[4] == 0xA0U &&
+          co_dst[45] == 0x11U);
+    uint8_t co_start[48] = { 0x02U, 0x02U, 0x00U, 0x30U, 0x70U };
+    co_start[39] = 0x04U;
+    dongle_dualsense_merge_usb_output_coalesced(co_dst, co_start, &defer_stop);
+    CHECK(!defer_stop && co_dst[3] == 0x30U && co_dst[4] == 0x70U);
+    uint8_t co_zero[48] = { 0x02U };
+    dongle_dualsense_merge_usb_output_coalesced(co_dst, co_zero, &defer_stop);
+    CHECK(defer_stop && co_dst[3] == 0x30U && co_dst[4] == 0x70U);
+    defer_stop = false;
+    uint8_t co_trig[48] = { 0x02U, 0x04U, 0x00U };
+    dongle_dualsense_merge_usb_output_coalesced(co_dst, co_trig, &defer_stop);
+    CHECK(!defer_stop && co_dst[3] == 0x30U && co_dst[4] == 0x70U);
+
     /* Cross-profile rumble translators (XInput, PS4, Switch Pro). */
     const uint8_t xi[8] = { 0x00U, 0x08U, 0x00U, 0xC0U, 0x40U, 0U, 0U, 0U };
     uint8_t ds_conv[48] = { 0 };

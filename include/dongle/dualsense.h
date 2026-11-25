@@ -45,4 +45,9 @@ bool dongle_dualsense_from_switch_rumble(const uint8_t *sw, size_t size,
 /* Merges src into a pending 48-byte USB 0x02 output report by valid flags so
  * rapid sequential updates (e.g. triggers followed by rumble) do not drop fields. */
 void dongle_dualsense_merge_usb_output(uint8_t dst[48], const uint8_t src[48]);
+/* Like merge, but a zero-rumble src cannot erase an unsent non-zero rumble pulse;
+ * *defer_rumble_stop is set true when the stop must follow the pending pulse. */
+void dongle_dualsense_merge_usb_output_coalesced(uint8_t dst[48],
+                                                 const uint8_t src[48],
+                                                 bool *defer_rumble_stop);
 #endif

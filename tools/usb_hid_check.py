@@ -928,6 +928,16 @@ def main():
                         f"bt_feat_set_ok={metrics['bt_feat_set_ok']}, bt_feat_get_ok={metrics['bt_feat_get_ok']}, "
                         f"last_feat=0x{metrics['last_feat_id']:02x}, last_hs=0x{metrics['last_handshake']:02x}, "
                         f"path={metrics['last_out_path_flags']}"
+                        + (
+                            f", flag0=0x{metrics['last_valid_flag0']:02x}, "
+                            f"flag1=0x{metrics['last_valid_flag1']:02x}, "
+                            f"motors=({metrics['last_motor_left']},{metrics['last_motor_right']}), "
+                            f"trig=(0x{metrics['last_left_trigger_mode']:02x},"
+                            f"0x{metrics['last_right_trigger_mode']:02x}), "
+                            f"fw_lo=0x{metrics['fw_ver_lo']:02x}"
+                            if metrics["fw_ver_lo"] is not None
+                            else ""
+                        )
                     )
             if args.dualsense_passthrough_test:
                 run_dualsense_passthrough_test(port)

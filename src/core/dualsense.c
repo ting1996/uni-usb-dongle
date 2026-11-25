@@ -185,12 +185,17 @@ void dongle_dualsense_normalize_usb_output(uint8_t usb_report[48],
     if (!usb_report || usb_report[0] != 0x02U) {
         return;
     }
-    if ((usb_report[1] & 0x01U) != 0U || (usb_report[39] & 0x04U) != 0U) {
+    const bool has_rumble_flag =
+        (usb_report[1] & 0x03U) != 0U || (usb_report[39] & 0x04U) != 0U;
+    const bool has_rumble_motors = usb_report[3] != 0U || usb_report[4] != 0U;
+    if (has_rumble_flag || has_rumble_motors) {
         usb_report[1] |= 0x02U; /* HAPTICS_SELECT */
-        if (fw_update_ver > 0U && fw_update_ver < 0x0224U &&
-            (usb_report[39] & 0x04U) != 0U) {
+        if (fw_update_ver < 0x0224U) {
             usb_report[1] |= 0x03U; /* Legacy COMPATIBLE_VIBRATION + HAPTICS_SELECT */
             usb_report[39] &= (uint8_t)(~0x04U & 0xFFU);
+        } else if ((usb_report[1] & 0x01U) == 0U &&
+                   (usb_report[39] & 0x04U) == 0U) {
+            usb_report[39] |= 0x04U; /* COMPATIBLE_VIBRATION2 */
         }
     }
 }
@@ -277,7 +282,8 @@ void dongle_dualsense_merge_usb_output(uint8_t dst[48], const uint8_t src[48])
     if (!dst || !src || dst[0] != 0x02U || src[0] != 0x02U) {
         return;
     }
-    if ((src[1] & 0x03U) != 0U || (src[39] & 0x04U) != 0U) {
+    if ((src[1] & 0x03U) != 0U || (src[39] & 0x04U) != 0U ||
+        src[3] != 0U || src[4] != 0U) {
         dst[3] = src[3];
         dst[4] = src[4];
         dst[1] = (uint8_t)((dst[1] & ~0x03U) | (src[1] & 0x03U));
@@ -323,4 +329,37 @@ void dongle_dualsense_merge_usb_output(uint8_t dst[48], const uint8_t src[48])
         dst[2] |= 0x08U;
     }
     memcpy(&dst[33], &src[33], 4U);
+}
+
+void dongle_dualsense_merge_usb_output_coalesced(uint8_t dst[48],
+                                                 const uint8_t src[48],
+                                                 bool *defer_rumble_stop)
+{
+    if (!dst || !src || dst[0] != 0x02U || src[0] != 0x02U) {
+        return;
+    }
+    const bool dst_nonzero = dst[3] != 0U || dst[4] != 0U;
+    const uint8_t saved_r = dst[3];
+    const uint8_t saved_l = dst[4];
+    const uint8_t saved_f0 = (uint8_t)(dst[1] & 0x03U);
+    const uint8_t saved_f2 = (uint8_t)(dst[39] & 0x04U);
+    const bool src_nonzero = src[3] != 0U || src[4] != 0U;
+    const bool src_has_rumble = (src[1] & 0x03U) != 0U ||
+                                (src[39] & 0x04U) != 0U || src_nonzero;
+    const bool src_is_zero_stop = !src_nonzero &&
+        src[1] == 0U && src[2] == 0U && src[39] == 0U;
+    dongle_dualsense_merge_usb_output(dst, src);
+    if (dst_nonzero && (src_has_rumble || src_is_zero_stop) && !src_nonzero) {
+        dst[3] = saved_r;
+        dst[4] = saved_l;
+        if ((dst[1] & 0x03U) == 0U && (dst[39] & 0x04U) == 0U) {
+            dst[1] |= (uint8_t)(saved_f0 != 0U ? saved_f0 : 0x02U);
+            dst[39] |= saved_f2;
+        }
+        if (defer_rumble_stop != NULL) {
+            *defer_rumble_stop = true;
+        }
+    } else if (src_nonzero && defer_rumble_stop != NULL) {
+        *defer_rumble_stop = false;
+    }
 }

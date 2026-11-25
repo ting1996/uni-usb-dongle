@@ -91,6 +91,10 @@ static TickType_t ds_out_last_at[2];
 #define DS_OUT_MIN_INTERVAL_MS 8U
 #define DS_OUT_MIN_INTERVAL_AUDIO_MS 16U
 #define DS_OUT_REFRESH_MS 1000U
+#define DS_OUT_ONSET_INTERVAL_MS 4U
+#define DS_OUT_MIN_PULSE_MS 28U
+static bool ds_out_stop_pending[2];
+static TickType_t ds_out_stop_at[2];
 static uint8_t ds_feat_tx_buf[2][64];
 static uint8_t ds_feat_tx_len[2];
 static volatile bool ds_feat_tx_pending[2];
@@ -784,6 +788,9 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
         dongle_usb_gamepad_dualsense_clear(p->slot);
         const bool locked = ds_lock();
         ds_out_pending[p->slot] = false;
+        ds_out_stop_pending[p->slot] = false;
+        ds_out_stop_at[p->slot] = 0;
+        ds_out_last_len[p->slot] = 0U;
         ds_out_retry_at[p->slot] = 0;
         ds_mic_enabled[p->slot] = false;
         ds_mic_unmuted[p->slot] = false;
@@ -1563,26 +1570,54 @@ static void radio_task(void *unused)
                     const uint16_t fw_ver = p->ds_feat_20_valid
                         ? (uint16_t)((uint16_t)p->ds_feat_20[44] |
                                      ((uint16_t)p->ds_feat_20[45] << 8U))
-                        : 0x0402U;
+                        : 0U;
                     const TickType_t out_gap = pdMS_TO_TICKS(dongle_usb_audio_is_streaming()
                         ? DS_OUT_MIN_INTERVAL_AUDIO_MS : DS_OUT_MIN_INTERVAL_MS);
                     locked = ds_lock();
+                    const bool buf_nonzero =
+                        ds_out_buf[p->slot][3] != 0U || ds_out_buf[p->slot][4] != 0U;
+                    const bool rumble_onset = buf_nonzero &&
+                        (!ds_out_last_len[p->slot] ||
+                         (ds_out_last[p->slot][3] == 0U && ds_out_last[p->slot][4] == 0U));
+                    const TickType_t effective_gap = rumble_onset
+                        ? pdMS_TO_TICKS(DS_OUT_ONSET_INTERVAL_MS) : out_gap;
+                    const bool stop_hold_ready = buf_nonzero ||
+                        ds_out_stop_at[p->slot] == 0 ||
+                        (int32_t)(now - ds_out_stop_at[p->slot]) >= 0;
                     /* Leave a newer report pending until both interval and any
                      * controller retry backoff elapse; do not drop on -ENOMEM. */
                     if (ds_out_pending[p->slot] &&
+                        stop_hold_ready &&
                         (int32_t)(now - ds_out_retry_at[p->slot]) >= 0 &&
                         (!ds_out_last_len[p->slot] ||
-                         (TickType_t)(now - ds_out_last_at[p->slot]) >= out_gap)) {
+                         (TickType_t)(now - ds_out_last_at[p->slot]) >= effective_gap)) {
                         usb_len = ds_out_len[p->slot];
                         out_path = ds_out_path[p->slot];
                         out_gen = ds_out_gen[p->slot];
                         memcpy(usb_copy, ds_out_buf[p->slot], sizeof(usb_copy));
+                        if (ds_out_last_len[p->slot] >= 5U &&
+                            (ds_out_last[p->slot][3] != 0U || ds_out_last[p->slot][4] != 0U) &&
+                            usb_copy[1] == 0U && usb_copy[2] == 0U && usb_copy[39] == 0U &&
+                            usb_copy[3] == 0U && usb_copy[4] == 0U) {
+                            usb_copy[1] |= 0x02U;
+                        }
                         dongle_dualsense_normalize_usb_output(usb_copy, fw_ver);
                         const bool unchanged = usb_len == ds_out_last_len[p->slot] &&
                             !memcmp(usb_copy, ds_out_last[p->slot], usb_len) &&
                             (TickType_t)(now - ds_out_last_at[p->slot]) < pdMS_TO_TICKS(DS_OUT_REFRESH_MS);
                         if (unchanged) {
-                            ds_out_pending[p->slot] = false;
+                            if (ds_out_stop_pending[p->slot]) {
+                                ds_out_stop_pending[p->slot] = false;
+                                ds_out_buf[p->slot][3] = 0U;
+                                ds_out_buf[p->slot][4] = 0U;
+                                usb_copy[3] = 0U;
+                                usb_copy[4] = 0U;
+                                dongle_dualsense_normalize_usb_output(usb_copy, fw_ver);
+                                has_out = true;
+                            } else {
+                                ds_out_pending[p->slot] = false;
+                                ds_out_stop_at[p->slot] = 0;
+                            }
                         } else {
                             has_out = true;
                         }
@@ -1600,7 +1635,22 @@ static void radio_task(void *unused)
                                 ds_out_last_len[p->slot] = usb_len;
                                 ds_out_last_at[p->slot] = now;
                                 ++ds_out_seq[p->slot];
-                                if (ds_out_gen[p->slot] == out_gen) {
+                                ds_out_stop_at[p->slot] =
+                                    (usb_copy[3] != 0U || usb_copy[4] != 0U)
+                                        ? (now + pdMS_TO_TICKS(DS_OUT_MIN_PULSE_MS))
+                                        : 0;
+                                if (ds_out_stop_pending[p->slot]) {
+                                    ds_out_stop_pending[p->slot] = false;
+                                    ds_out_buf[p->slot][3] = 0U;
+                                    ds_out_buf[p->slot][4] = 0U;
+                                    if ((ds_out_buf[p->slot][1] & 0x03U) == 0U &&
+                                        (ds_out_buf[p->slot][39] & 0x04U) == 0U) {
+                                        ds_out_buf[p->slot][1] |= 0x02U;
+                                    }
+                                    ds_out_pending[p->slot] = true;
+                                    ds_out_stop_at[p->slot] =
+                                        now + pdMS_TO_TICKS(DS_OUT_MIN_PULSE_MS);
+                                } else if (ds_out_gen[p->slot] == out_gen) {
                                     ds_out_pending[p->slot] = false;
                                 }
                                 ++ds_stats[p->slot].bt_out_31_ok;
@@ -1831,6 +1881,24 @@ size_t dongle_bluetooth_dualsense_feature(
         }
         break;
     }
+    if (copied == 0U && report_id == 0x09U && capacity >= 20U) {
+        for (unsigned i = 0U; i < PEERS; ++i) {
+            const peer_t *p = &peers[i];
+            if (p->role || !p->saved || p->slot != slot) {
+                continue;
+            }
+            memset(out, 0, 20U);
+            out[0] = 0x09U;
+            memcpy(&out[1], p->address.val, 6U);
+            out[7] = 0x08U;
+            out[8] = 0x25U;
+            for (unsigned k = 0U; k < 6U; ++k) {
+                out[10U + k] = local_address[5U - k];
+            }
+            copied = 20U;
+            break;
+        }
+    }
     ds_unlock(locked);
     return copied;
 }
@@ -1847,11 +1915,16 @@ void dongle_bluetooth_send_dualsense_output_ex(
     if (ds_out_pending[slot] &&
         ds_out_len[slot] == DONGLE_DUALSENSE_USB_OUTPUT_SIZE &&
         len == DONGLE_DUALSENSE_USB_OUTPUT_SIZE) {
-        dongle_dualsense_merge_usb_output(ds_out_buf[slot], usb_report);
+        dongle_dualsense_merge_usb_output_coalesced(
+            ds_out_buf[slot], usb_report, &ds_out_stop_pending[slot]);
     } else {
         memcpy(ds_out_buf[slot], usb_report, len);
         ds_out_len[slot] = len;
         ds_out_pending[slot] = true;
+        ds_out_stop_pending[slot] = false;
+    }
+    if (usb_report[3] != 0U || usb_report[4] != 0U) {
+        ds_out_stop_at[slot] = 0;
     }
     ++ds_out_gen[slot];
     ds_out_path[slot] |= path_flags;

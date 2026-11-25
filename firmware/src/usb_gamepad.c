@@ -89,6 +89,8 @@ static TickType_t test_started[DONGLE_USB_GAMEPAD_COUNT];
 static TickType_t last_sent[DONGLE_USB_GAMEPAD_COUNT];
 static uint8_t idle_rate[DONGLE_USB_GAMEPAD_COUNT];
 static uint8_t tx_counter[DONGLE_USB_GAMEPAD_COUNT];
+static uint32_t ds_pkt_seq[DONGLE_USB_GAMEPAD_COUNT];
+static uint32_t ds_sensor_ts[DONGLE_USB_GAMEPAD_COUNT];
 static volatile bool switch_streaming[DONGLE_USB_GAMEPAD_COUNT];
 static volatile bool switch_reply_pending[DONGLE_USB_GAMEPAD_COUNT];
 static uint8_t switch_reply_buf[DONGLE_USB_GAMEPAD_COUNT][64];
@@ -189,7 +191,15 @@ static size_t encode_gamepad_report(
         memcpy(out, raw_ds_reports[slot], 64U);
         return 64U;
     }
-    return dongle_output_encode(profile, reports[slot], tx_counter[slot], out);
+    const size_t len =
+        dongle_output_encode(profile, reports[slot], tx_counter[slot], out);
+    if (profile == DONGLE_PROFILE_DUALSENSE && len == 64U) {
+        put_le32(&out[12], ds_pkt_seq[slot]++);
+        put_le32(&out[28], ds_sensor_ts[slot]);
+        ds_sensor_ts[slot] += 12000U;
+        out[54] = 0x08U;
+    }
+    return len;
 }
 
 static uint8_t active_gamepad_count(void)
@@ -407,6 +417,8 @@ static void gamepad_task(void *argument)
                 test_active[i] = false;
                 idle_rate[i] = 0;
                 tx_counter[i] = 0;
+                ds_pkt_seq[i] = 0U;
+                ds_sensor_ts[i] = 10200000U;
                 switch_streaming[i] = false;
                 switch_reply_pending[i] = false;
                 raw_ds_valid[i] = false;
@@ -499,7 +511,10 @@ static void gamepad_task(void *argument)
                     continue;
                 }
             }
-            if (!pending[i] && !idle_due) {
+            const bool ds_periodic_due = profile == DONGLE_PROFILE_DUALSENSE &&
+                (!raw_ds_valid[i] ||
+                 (TickType_t)(now - last_sent[i]) >= pdMS_TO_TICKS(12U));
+            if (!pending[i] && !idle_due && !ds_periodic_due) {
                 continue;
             }
             const size_t report_len = encode_gamepad_report(i, profile, tx_buffer[i]);
@@ -604,7 +619,7 @@ void usbd_hid_get_report(uint8_t busid, uint8_t intf, uint8_t report_id,
                 } else if (report_id == 0x20U) {
                     memcpy(&(*data)[1], "Jan 01 2025", 11U);
                     memcpy(&(*data)[12], "00:00:00", 8U);
-                    put_le16(&(*data)[20], 1U);
+                    put_le16(&(*data)[20], 2U);
                     put_le32(&(*data)[24], 0x00000314U);
                     put_le32(&(*data)[28], 0x01000000U);
                     put_le16(&(*data)[44], 0x0402U);
