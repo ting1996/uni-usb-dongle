@@ -95,6 +95,8 @@ static TickType_t ds_out_last_at[2];
 #define DS_OUT_MIN_PULSE_MS 28U
 static bool ds_out_stop_pending[2];
 static TickType_t ds_out_stop_at[2];
+static TickType_t ds_hid_rumble_until[2];
+static volatile uint16_t ds_rumble_gain_pct = 100U;
 static uint8_t ds_feat_tx_buf[2][64];
 static uint8_t ds_feat_tx_len[2];
 static volatile bool ds_feat_tx_pending[2];
@@ -643,6 +645,7 @@ static int receive_input(struct bt_l2cap_chan *chan, struct net_buf *buf)
             if (buf->data[1] == 0x31U && buf->len - 1U == 78U) {
                 ds_usb[0] = 0x01U;
                 memcpy(ds_usb + 1U, buf->data + 3U, 63U);
+                ds_usb[54] |= 0x08U;
                 has_raw = true;
             } else {
                 has_raw = dongle_dualsense_bt_to_usb_input(buf->data + 1, buf->len - 1, ds_usb);
@@ -774,6 +777,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
         ds_out_stop_at[p->slot] = 0;
         ds_out_last_len[p->slot] = 0U;
         ds_out_retry_at[p->slot] = 0;
+        ds_hid_rumble_until[p->slot] = 0;
         ds_mic_enabled[p->slot] = false;
         ds_mic_unmuted[p->slot] = false;
         ds_mic_retry_at[p->slot] = 0;
@@ -1910,6 +1914,13 @@ static void radio_task(void *unused)
                     const uint8_t seq = ds_out_seq[p->slot];
                     ds_unlock(locked);
                     if (has_out) {
+                        if ((out_path & 0x10U) == 0U && ds_rumble_gain_pct != 100U) {
+                            const uint32_t g = ds_rumble_gain_pct;
+                            uint32_t mr = ((uint32_t)usb_copy[3] * g + 50U) / 100U;
+                            uint32_t ml = ((uint32_t)usb_copy[4] * g + 50U) / 100U;
+                            usb_copy[3] = mr > 255U ? 255U : (uint8_t)mr;
+                            usb_copy[4] = ml > 255U ? 255U : (uint8_t)ml;
+                        }
                         uint8_t bt_rep[DONGLE_DUALSENSE_BT_OUTPUT_SIZE];
                         if (dongle_dualsense_usb_to_bt_output(usb_copy, usb_len, seq, bt_rep)) {
                             const int tx_err = ds_send_l2cap_report(
@@ -2271,11 +2282,42 @@ void dongle_bluetooth_send_dualsense_output_ex(
     }
     if (usb_report[3] != 0U || usb_report[4] != 0U) {
         ds_out_stop_at[slot] = 0;
+        if ((path_flags & 0x10U) == 0U) {
+            ds_hid_rumble_until[slot] = ds_now_ticks() + pdMS_TO_TICKS(150U);
+        }
     }
     ++ds_out_gen[slot];
     ds_out_path[slot] |= path_flags;
     ++ds_stats[slot].usb_out_02;
     ds_unlock(locked);
+}
+void dongle_bluetooth_send_dualsense_audio_haptics(
+    uint8_t slot, uint8_t motor_left, uint8_t motor_right)
+{
+    if (slot >= 2U) {
+        return;
+    }
+    const TickType_t now = ds_now_ticks();
+    const bool locked = ds_lock();
+    const bool hid_active = ds_hid_rumble_until[slot] != 0 &&
+                            (int32_t)(now - ds_hid_rumble_until[slot]) < 0;
+    ds_unlock(locked);
+    if (hid_active) {
+        return;
+    }
+    uint8_t ds_out[DONGLE_DUALSENSE_USB_OUTPUT_SIZE] = { 0 };
+    ds_out[0] = 0x02U;
+    ds_out[1] = 0x02U;  /* HAPTICS_SELECT */
+    ds_out[3] = motor_right;
+    ds_out[4] = motor_left;
+    ds_out[39] = 0x04U; /* COMPATIBLE_VIBRATION2 */
+    dongle_bluetooth_send_dualsense_output_ex(slot, ds_out, sizeof(ds_out), 0x10U);
+}
+void dongle_bluetooth_set_rumble_gain(uint16_t gain_pct)
+{
+    ds_rumble_gain_pct = gain_pct > DONGLE_RUMBLE_GAIN_MAX
+        ? DONGLE_RUMBLE_GAIN_MAX
+        : gain_pct;
 }
 void dongle_bluetooth_send_dualsense_output(
     uint8_t slot, const uint8_t *usb_report, size_t size)

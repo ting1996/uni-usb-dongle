@@ -27,6 +27,8 @@ export const COMMAND = Object.freeze({
   getBlocklist: 0x25,
   blockDevice: 0x26,
   unblockDevice: 0x27,
+  getRumbleGain: 0x28,
+  setRumbleGain: 0x29,
 });
 
 export const STATUS = Object.freeze({
@@ -339,6 +341,22 @@ export function parseGamepadDiagnostics(bytes) {
     tickCount: view.getUint32(19, true),
     testStarted: view.getUint32(23, true),
   };
+}
+
+export function parseRumbleGain(bytes) {
+  if (!(bytes instanceof Uint8Array) || bytes.length !== 3 || bytes[0] !== STATUS.ok) {
+    throw new TypeError("Invalid rumble gain response");
+  }
+  const gainPct = bytes[1] | (bytes[2] << 8);
+  if (gainPct > 400) {
+    throw new TypeError("Invalid rumble gain value");
+  }
+  return { gainPct };
+}
+
+export function encodeRumbleGain(gainPct) {
+  const value = Math.max(0, Math.min(400, Math.round(Number(gainPct))));
+  return Uint8Array.of(value & 0xff, (value >> 8) & 0xff);
 }
 
 export function parseMicState(bytes) {

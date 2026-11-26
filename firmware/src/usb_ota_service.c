@@ -152,6 +152,7 @@ static const char *usb_ota_string_descriptors[] = {
     "Uni USB Dongle",
     "Bluetooth Gamepads + Stereo Audio",
     "00000001",
+    "Uni Dongle Bluetooth Audio",
 };
 
 static const uint8_t *usb_ota_device_descriptor_callback(uint8_t speed)
@@ -269,6 +270,7 @@ static int attach_usb_stack(bool first_boot)
         dongle_usb_audio_attach(USB_OTA_BUS_ID);
         dongle_usb_gamepad_attach(USB_OTA_BUS_ID);
     }
+    dongle_usb_audio_attach_headphone(USB_OTA_BUS_ID);
     return usbd_initialize(USB_OTA_BUS_ID, 0U, usb_ota_event_handler);
 }
 
@@ -962,6 +964,51 @@ static void usb_ota_task(void *argument)
             }
             (void)send_response_payload(&frame, &rc, 1U);
             continue;
+        } else if (frame.command == DONGLE_USB_OTA_CMD_GET_RUMBLE_GAIN) {
+            uint8_t reply[DONGLE_RUMBLE_GAIN_PAYLOAD_SIZE] = { 0 };
+            if (frame.payload_size != 0U) {
+                reply[0] = DONGLE_USB_OTA_STATUS_INVALID_FRAME;
+                (void)send_response_payload(&frame, reply, 1U);
+            } else {
+                const uint16_t gain = dongle_usb_audio_get_rumble_gain();
+                reply[0] = DONGLE_USB_OTA_STATUS_OK;
+                reply[1] = (uint8_t)(gain & 0xffU);
+                reply[2] = (uint8_t)(gain >> 8U);
+                (void)send_response_payload(&frame, reply, sizeof(reply));
+            }
+            continue;
+        } else if (frame.command == DONGLE_USB_OTA_CMD_SET_RUMBLE_GAIN) {
+            uint8_t reply[DONGLE_RUMBLE_GAIN_PAYLOAD_SIZE] = { 0 };
+            if (session.handle != NULL) {
+                reply[0] = DONGLE_USB_OTA_STATUS_BUSY;
+                (void)send_response_payload(&frame, reply, 1U);
+            } else if (frame.payload_size != 2U ||
+                       read_u16_le(frame.payload) > DONGLE_RUMBLE_GAIN_MAX) {
+                reply[0] = DONGLE_USB_OTA_STATUS_INVALID_FRAME;
+                (void)send_response_payload(&frame, reply, 1U);
+            } else {
+                const uint16_t gain = read_u16_le(frame.payload);
+                if (device_catalog_mutex != NULL &&
+                    xSemaphoreTake(device_catalog_mutex, portMAX_DELAY) == pdTRUE) {
+                    const uint16_t prev = saved_prefs.rumble_gain_pct;
+                    saved_prefs.rumble_gain_pct = gain;
+                    if (!save_prefs()) {
+                        saved_prefs.rumble_gain_pct = prev;
+                        reply[0] = DONGLE_USB_OTA_STATUS_STORAGE_ERROR;
+                        (void)xSemaphoreGive(device_catalog_mutex);
+                        (void)send_response_payload(&frame, reply, 1U);
+                        continue;
+                    }
+                    (void)xSemaphoreGive(device_catalog_mutex);
+                }
+                dongle_usb_audio_set_rumble_gain(gain);
+                dongle_bluetooth_set_rumble_gain(gain);
+                reply[0] = DONGLE_USB_OTA_STATUS_OK;
+                reply[1] = (uint8_t)(gain & 0xffU);
+                reply[2] = (uint8_t)(gain >> 8U);
+                (void)send_response_payload(&frame, reply, sizeof(reply));
+            }
+            continue;
         } else if (frame.command == DONGLE_USB_OTA_CMD_GET_BLOCKLIST) {
             uint8_t reply[DONGLE_BLOCKLIST_MAX_PAYLOAD_SIZE] = { 0 };
             if (frame.payload_size != 0U) {
@@ -1208,6 +1255,8 @@ BaseType_t dongle_usb_ota_service_start(
         device_settings_store = NULL;
         return pdFAIL;
     }
+    dongle_usb_audio_set_rumble_gain(saved_prefs.rumble_gain_pct);
+    dongle_bluetooth_set_rumble_gain(saved_prefs.rumble_gain_pct);
 
     if (xTaskCreate(usb_ota_task, "usb_ota", USB_OTA_TASK_STACK_WORDS, NULL,
                     USB_OTA_TASK_PRIORITY, &usb_ota_task_handle) != pdPASS) {

@@ -13,9 +13,12 @@ static volatile uint8_t saved_default;
 static volatile bool persisted_default;
 static volatile uint8_t active_gamepads = 1U, desired_gamepads = 1U;
 static TickType_t apply_at;
-static uint8_t config_fs[384], config_hs[384], config_other_fs[384], config_other_hs[384];
+static uint8_t config_fs[512], config_hs[512], config_other_fs[512], config_other_hs[512];
 _Static_assert(9U + DONGLE_AUDIO_DESCRIPTOR_SIZE + 25U + 2U * 40U <= sizeof(config_fs),
                "profile config descriptor buffer too small");
+_Static_assert(9U + DONGLE_DUALSENSE_AUDIO_DESCRIPTOR_SIZE + 32U + 25U +
+               DONGLE_HEADPHONE_AUDIO_DESCRIPTOR_SIZE <= sizeof(config_fs),
+               "dualsense audio config descriptor buffer too small");
 static uint8_t device_descriptor[18] = {
     18,1,0,2,0xef,2,1,64,0xff,0xff,0xff,0xff,0x04,0x01,1,2,3,1
 };
@@ -103,6 +106,7 @@ static void apply_device_identity(uint8_t profile)
     device_descriptor[11] = (uint8_t)(pid >> 8U);
     device_descriptor[12] = (uint8_t)(bcd & 0xffU);
     device_descriptor[13] = (uint8_t)(bcd >> 8U);
+    device_descriptor[16] = (profile == DONGLE_PROFILE_DUALSENSE) ? 0U : 3U;
 }
 
 static uint8_t dualsense_ep_interval(bool hs, uint8_t poll_rate)
@@ -149,8 +153,15 @@ uint8_t dongle_usb_profile_mgmt_interface(void)
 {
     return (uint8_t)(3U + dongle_usb_profile_gamepad_count());
 }
+bool dongle_usb_profile_dualsense_split_audio(void)
+{
+    return active == DONGLE_PROFILE_DUALSENSE && dongle_usb_profile_gamepad_count() == 1U;
+}
 uint8_t dongle_usb_profile_gamepad_out_ep(uint8_t slot)
 {
+    if (dongle_usb_profile_dualsense_split_audio()) {
+        return 0U;
+    }
     if (slot == 0U && dongle_usb_profile_gamepad_count() == 1U &&
         active != DONGLE_PROFILE_GENERIC) {
         return 0x02U;
@@ -229,16 +240,34 @@ void dongle_usb_profile_activate(void)
 const uint8_t *dongle_usb_profile_device(void) { return device_descriptor; }
 const struct usb_msosv1_descriptor *dongle_usb_profile_msos(void)
 { return dongle_usb_profile_gamepad_count() == 2U ? &msos_2 : &msos_1; }
+static const uint8_t audio_fs[] = { DONGLE_AUDIO_DESCRIPTOR(1) };
+static const uint8_t audio_hs[] = { DONGLE_AUDIO_DESCRIPTOR(4) };
+static const uint8_t ds_audio_split_fs[] = { DONGLE_DUALSENSE_AUDIO_DESCRIPTOR(1, 0x02) };
+static const uint8_t ds_audio_split_hs[] = { DONGLE_DUALSENSE_AUDIO_DESCRIPTOR(4, 0x02) };
+static const uint8_t ds_audio_merged_fs[] = { DONGLE_DUALSENSE_AUDIO_DESCRIPTOR(1, 0x03) };
+static const uint8_t ds_audio_merged_hs[] = { DONGLE_DUALSENSE_AUDIO_DESCRIPTOR(4, 0x03) };
+static const uint8_t hp_audio_fs[] = { DONGLE_HEADPHONE_AUDIO_DESCRIPTOR(5, 6, 1) };
+static const uint8_t hp_audio_hs[] = { DONGLE_HEADPHONE_AUDIO_DESCRIPTOR(5, 6, 4) };
+
 const uint8_t *dongle_usb_profile_config(uint8_t speed, bool other_speed)
 {
     bool hs = speed == USB_SPEED_HIGH;
     uint8_t *out = other_speed ? (hs ? config_other_fs : config_other_hs) :
                                 (hs ? config_hs : config_fs);
     if (other_speed) hs = !hs;
-    const uint8_t audio_fs[] = { DONGLE_AUDIO_DESCRIPTOR(1) };
-    const uint8_t audio_hs[] = { DONGLE_AUDIO_DESCRIPTOR(4) };
     size_t n = 9;
-    memcpy(out + n, hs ? audio_hs : audio_fs, sizeof(audio_fs)); n += sizeof(audio_fs);
+    const bool split_audio = dongle_usb_profile_dualsense_split_audio();
+    if (active == DONGLE_PROFILE_DUALSENSE) {
+        const uint8_t *ds_audio = split_audio
+            ? (hs ? ds_audio_split_hs : ds_audio_split_fs)
+            : (hs ? ds_audio_merged_hs : ds_audio_merged_fs);
+        const size_t ds_len = split_audio ? sizeof(ds_audio_split_fs) : sizeof(ds_audio_merged_fs);
+        memcpy(out + n, ds_audio, ds_len);
+        n += ds_len;
+    } else {
+        memcpy(out + n, hs ? audio_hs : audio_fs, sizeof(audio_fs));
+        n += sizeof(audio_fs);
+    }
     const uint8_t *report;
     uint16_t length = dongle_usb_profile_report_descriptor(&report);
     const uint8_t gp_count = dongle_usb_profile_gamepad_count();
@@ -254,17 +283,18 @@ const uint8_t *dongle_usb_profile_config(uint8_t speed, bool other_speed)
             };
             memcpy(out + n, xusb, sizeof(xusb)); n += sizeof(xusb);
         } else {
-            bool extra = active != DONGLE_PROFILE_GENERIC;
+            const bool extra = active != DONGLE_PROFILE_GENERIC;
+            const bool has_out_ep = extra && ep_out != 0U;
             const uint8_t ep_interval = active == DONGLE_PROFILE_DUALSENSE
                 ? dualsense_ep_interval(hs, active_ds_poll)
                 : (uint8_t)(hs ? 6 : 4);
             const uint8_t hid[] = {
-                9,4,intf_num,0,(uint8_t)(extra ? 2 : 1),3,0,0,0,
+                9,4,intf_num,0,(uint8_t)(has_out_ep ? 2U : 1U),3,0,0,0,
                 9,0x21,0x11,1,0,1,0x22,(uint8_t)(length & 255U),(uint8_t)(length >> 8U),
                 7,5,ep_in,3,(uint8_t)(extra ? 64 : 10),0,ep_interval,
                 7,5,ep_out,3,64,0,ep_interval
             };
-            size_t size = sizeof(hid) - (extra ? 0U : 7U);
+            size_t size = sizeof(hid) - (has_out_ep ? 0U : 7U);
             memcpy(out + n, hid, size); n += size;
         }
     }
@@ -274,7 +304,12 @@ const uint8_t *dongle_usb_profile_config(uint8_t speed, bool other_speed)
         7,5,0x85,3,64,0,(uint8_t)(hs ? 6 : 4)
     };
     memcpy(out + n, management, sizeof(management)); n += sizeof(management);
-    const uint8_t header[] = {9,(uint8_t)(other_speed ? 7 : 2),(uint8_t)(n & 255U),(uint8_t)(n >> 8U),(uint8_t)(4U + gp_count),1,0,0x80,50};
+    if (split_audio) {
+        memcpy(out + n, hs ? hp_audio_hs : hp_audio_fs, sizeof(hp_audio_fs));
+        n += sizeof(hp_audio_fs);
+    }
+    const uint8_t total_intfs = (uint8_t)(4U + gp_count + (split_audio ? 2U : 0U));
+    const uint8_t header[] = {9,(uint8_t)(other_speed ? 7 : 2),(uint8_t)(n & 255U),(uint8_t)(n >> 8U),total_intfs,1,0,0x80,50};
     memcpy(out, header, sizeof(header));
     return out;
 }

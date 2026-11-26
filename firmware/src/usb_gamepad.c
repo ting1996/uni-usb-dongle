@@ -569,6 +569,8 @@ static DONGLE_TCM_CODE void gamepad_task(void *argument)
                 if (busy[i] || rx_busy[i]) {
                     continue;
                 }
+                const bool has_shared_out = profile != DONGLE_PROFILE_GENERIC &&
+                                            dongle_usb_profile_gamepad_out_ep(i) != 0U;
                 if (profile == DONGLE_PROFILE_SWITCH) {
                     if (switch_reply_pending[i]) {
                         memcpy(tx_buffer[i], switch_reply_buf[i], sizeof(tx_buffer[i]));
@@ -584,7 +586,7 @@ static DONGLE_TCM_CODE void gamepad_task(void *argument)
                         }
                         continue;
                     }
-                    if (!switch_streaming[i] || out_fifo_bytes(i) > 0U) {
+                    if (has_shared_out && (!switch_streaming[i] || out_fifo_bytes(i) > 0U)) {
                         rx_busy[i] = true;
                         if (usbd_ep_start_read(gamepad_bus, dongle_usb_profile_gamepad_out_ep(i),
                                                rx_buffer[i], sizeof(rx_buffer[i])) != 0) {
@@ -592,7 +594,7 @@ static DONGLE_TCM_CODE void gamepad_task(void *argument)
                         }
                         continue;
                     }
-                } else if (profile != DONGLE_PROFILE_GENERIC && out_fifo_bytes(i) > 0U) {
+                } else if (has_shared_out && out_fifo_bytes(i) > 0U) {
                     rx_busy[i] = true;
                     if (usbd_ep_start_read(gamepad_bus, dongle_usb_profile_gamepad_out_ep(i),
                                            rx_buffer[i], sizeof(rx_buffer[i])) != 0) {
@@ -600,7 +602,7 @@ static DONGLE_TCM_CODE void gamepad_task(void *argument)
                     }
                     continue;
                 }
-                if (profile != DONGLE_PROFILE_GENERIC && !fifo_is_empty(i)) {
+                if (has_shared_out && !fifo_is_empty(i)) {
                     continue;
                 }
             }
@@ -804,7 +806,8 @@ void dongle_usb_gamepad_attach(uint8_t busid)
 
     const dongle_output_profile_t profile = dongle_usb_profile();
     const uint8_t gamepad_count = active_gamepad_count();
-    out_ep_dedicated = gamepad_count == 1U && profile != DONGLE_PROFILE_GENERIC;
+    out_ep_dedicated = gamepad_count == 1U &&
+                       dongle_usb_profile_gamepad_out_ep(0U) == 0x02U;
     const uint8_t *desc = NULL;
     const uint16_t desc_len = dongle_usb_profile_report_descriptor(&desc);
     for (uint8_t i = 0U; i < gamepad_count; ++i) {
@@ -824,8 +827,9 @@ void dongle_usb_gamepad_attach(uint8_t busid)
                 busid, &interfaces[i], desc, desc_len));
         }
         usbd_add_endpoint(busid, &endpoints[i]);
-        if (profile != DONGLE_PROFILE_GENERIC) {
-            out_endpoints[i].ep_addr = dongle_usb_profile_gamepad_out_ep(i);
+        const uint8_t ep_out = dongle_usb_profile_gamepad_out_ep(i);
+        if (profile != DONGLE_PROFILE_GENERIC && ep_out != 0U) {
+            out_endpoints[i].ep_addr = ep_out;
             usbd_add_endpoint(busid, &out_endpoints[i]);
         }
     }

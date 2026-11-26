@@ -22,11 +22,13 @@ int main(void)
     CHECK(prefs.audio_codec == 0U);
     CHECK(prefs.mic_source == DONGLE_MIC_SOURCE_AUTO);
     CHECK(prefs.dualsense_poll_rate == DONGLE_DS_POLL_250HZ);
+    CHECK(prefs.rumble_gain_pct == 100U);
 
     prefs.boot_profile = DONGLE_PROFILE_DUALSENSE;
     prefs.audio_codec = 1U;
     prefs.mic_source = DONGLE_MIC_SOURCE_HEADPHONE;
     prefs.dualsense_poll_rate = DONGLE_DS_POLL_750HZ;
+    prefs.rumble_gain_pct = 250U;
 
     uint8_t blob[DONGLE_PREFS_BLOB_SIZE];
     CHECK(dongle_prefs_encode(&prefs, blob, sizeof(blob) - 1U) ==
@@ -40,6 +42,7 @@ int main(void)
     CHECK(decoded.audio_codec == 1U);
     CHECK(decoded.mic_source == DONGLE_MIC_SOURCE_HEADPHONE);
     CHECK(decoded.dualsense_poll_rate == DONGLE_DS_POLL_750HZ);
+    CHECK(decoded.rumble_gain_pct == 250U);
 
     /* Corrupt CRC / payload -> rejected without changing decoded. */
     blob[5] ^= 0x01U;
@@ -78,6 +81,19 @@ int main(void)
     invalid = prefs;
     invalid.dualsense_poll_rate = DONGLE_DS_POLL_RATE_COUNT;
     CHECK(dongle_prefs_encode(&invalid, blob, sizeof(blob)) == DONGLE_PREFS_INVALID_DATA);
+    invalid = prefs;
+    invalid.rumble_gain_pct = DONGLE_RUMBLE_GAIN_MAX + 1U;
+    CHECK(dongle_prefs_encode(&invalid, blob, sizeof(blob)) == DONGLE_PREFS_INVALID_DATA);
+
+    /* Rumble gain 0% and 400% round-trip cleanly. */
+    prefs.rumble_gain_pct = 0U;
+    CHECK(dongle_prefs_encode(&prefs, blob, sizeof(blob)) == DONGLE_PREFS_OK);
+    CHECK(dongle_prefs_decode(blob, sizeof(blob), &decoded) == DONGLE_PREFS_OK);
+    CHECK(decoded.rumble_gain_pct == 0U);
+    prefs.rumble_gain_pct = DONGLE_RUMBLE_GAIN_MAX;
+    CHECK(dongle_prefs_encode(&prefs, blob, sizeof(blob)) == DONGLE_PREFS_OK);
+    CHECK(dongle_prefs_decode(blob, sizeof(blob), &decoded) == DONGLE_PREFS_OK);
+    CHECK(decoded.rumble_gain_pct == DONGLE_RUMBLE_GAIN_MAX);
 
     puts("Preferences codec tests passed");
     return 0;

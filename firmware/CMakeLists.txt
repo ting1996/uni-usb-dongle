@@ -83,6 +83,7 @@ target_sources(app PRIVATE
     ../src/core/device_blocklist.c
     ../src/core/device_catalog.c
     ../src/core/dualsense.c
+    ../src/core/dualsense_haptics.c
     ../src/core/dualsense_mic.c
     ../src/core/gamepad_router.c
     ../src/core/hfp_ag.c

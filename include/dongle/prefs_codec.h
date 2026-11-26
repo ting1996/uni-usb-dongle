@@ -20,6 +20,7 @@ typedef struct {
     uint8_t audio_codec;
     uint8_t mic_source;
     uint8_t dualsense_poll_rate;
+    uint16_t rumble_gain_pct;
 } dongle_prefs_t;
 
 dongle_prefs_result_t dongle_prefs_init_defaults(dongle_prefs_t *prefs);

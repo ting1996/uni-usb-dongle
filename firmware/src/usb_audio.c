@@ -3,6 +3,8 @@
 #include "dongle/a2dp_packetizer.h"
 #include "dongle/audio_stream.h"
 #include "dongle/bluetooth.h"
+#include "dongle/dualsense_haptics.h"
+#include "dongle/usb_profiles.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "usbd_core.h"
@@ -39,10 +41,17 @@ static TaskHandle_t audio_task_handle;
 static volatile bool audio_ota_suspend_req;
 static volatile bool audio_ota_suspended;
 static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t packet[512];
+static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t ds_haptics_packet[512];
 static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t mic_packet[64];
-static struct usbd_interface control, stream, mic_stream;
+static dongle_ds_haptics_t ds_haptics;
+static uint8_t ds_stereo_scratch[196];
+static volatile bool ds_opened, ds_playback_muted;
+static volatile int ds_playback_volume_db;
+static struct usbd_interface control, stream, mic_stream, hp_control, hp_stream;
 static struct audio_entity_info audio_entities[] = {
+    { .bEntityId = 2, .bDescriptorSubtype = AUDIO_CONTROL_FEATURE_UNIT, .ep = 0x02 },
     { .bEntityId = 4, .bDescriptorSubtype = AUDIO_CONTROL_FEATURE_UNIT, .ep = 0x84 },
+    { .bEntityId = 5, .bDescriptorSubtype = AUDIO_CONTROL_FEATURE_UNIT, .ep = 0x84 },
 };
 
 void dongle_usb_audio_streaming(bool active, uint8_t codec, uint32_t rate_hz, uint16_t media_mtu)
@@ -110,11 +119,66 @@ void dongle_usb_audio_mic_metrics(bool *open, bool *muted, uint16_t *peak,
     if (sent_bytes) *sent_bytes = sb;
     if (errors) *errors = err;
 }
+static DONGLE_TCM_CODE void ds_audio_received(uint8_t id, uint8_t ep, uint32_t size)
+{
+    if (id != bus || ep != 0x02U || !ds_opened) return;
+    if (size > 0U && size <= 392U && (size % 8U) == 0U) {
+        if (ds_playback_muted) {
+            if (dongle_ds_haptics_reset(&ds_haptics)) {
+                dongle_bluetooth_send_dualsense_audio_haptics(0U, 0U, 0U);
+            }
+        } else {
+            uint8_t motor_l = 0U;
+            uint8_t motor_r = 0U;
+            bool haptics_changed = false;
+            if (dongle_ds_haptics_process_4ch(
+                    &ds_haptics, ds_haptics_packet, size, NULL, NULL,
+                    NULL, NULL, &motor_l, &motor_r, &haptics_changed)) {
+                if (haptics_changed) {
+                    dongle_bluetooth_send_dualsense_audio_haptics(0U, motor_l, motor_r);
+                }
+            } else {
+                ++errors;
+            }
+        }
+    } else {
+        ++errors;
+    }
+    if (usbd_ep_start_read(bus, 0x02U, ds_haptics_packet, 392U)) ++errors;
+}
 static DONGLE_TCM_CODE void audio_received(uint8_t id, uint8_t ep, uint32_t size)
 {
     if (id != bus || ep != 3 || !opened) return;
     size_t written = 0;
-    if (size <= 388U && !(size % 4U)) {
+    const bool ds_quad = dongle_usb_profile() == DONGLE_PROFILE_DUALSENSE &&
+                         !dongle_usb_profile_dualsense_split_audio();
+    if (ds_quad) {
+        if (size > 0U && size <= 392U && (size % 8U) == 0U) {
+            size_t stereo_bytes = 0U;
+            uint16_t pkt_l = 0U;
+            uint16_t pkt_r = 0U;
+            uint8_t motor_l = 0U;
+            uint8_t motor_r = 0U;
+            bool haptics_changed = false;
+            if (dongle_ds_haptics_process_4ch(
+                    &ds_haptics, packet, size, ds_stereo_scratch, &stereo_bytes,
+                    &pkt_l, &pkt_r, &motor_l, &motor_r, &haptics_changed)) {
+                if (pkt_l > peak_left) peak_left = pkt_l;
+                if (pkt_r > peak_right) peak_right = pkt_r;
+                if (pkt_l > 0U || pkt_r > 0U) ++nonzero_packets;
+                dongle_audio_stream_write(&pcm, ds_stereo_scratch, stereo_bytes, &written);
+                received += written;
+                if (written < stereo_bytes) ++overflows;
+                if (haptics_changed) {
+                    dongle_bluetooth_send_dualsense_audio_haptics(0U, motor_l, motor_r);
+                }
+            } else {
+                ++errors;
+            }
+        } else {
+            ++errors;
+        }
+    } else if (size <= 388U && !(size % 4U)) {
         uint16_t pkt_peak = 0U;
         for (uint32_t i = 0; i + 3U < size; i += 4U) {
             const int16_t l = (int16_t)((uint16_t)packet[i] | ((uint16_t)packet[i + 1U] << 8U));
@@ -131,7 +195,7 @@ static DONGLE_TCM_CODE void audio_received(uint8_t id, uint8_t ep, uint32_t size
         received += written;
         if (written < size) ++overflows;
     } else ++errors;
-    if (usbd_ep_start_read(bus, 3, packet, 388)) ++errors;
+    if (usbd_ep_start_read(bus, 3, packet, ds_quad ? 392U : 388U)) ++errors;
 }
 static DONGLE_TCM_CODE uint16_t db_to_q15_gain(int db)
 {
@@ -188,13 +252,28 @@ static DONGLE_TCM_CODE void mic_sent(uint8_t id, uint8_t ep, uint32_t size)
     }
 }
 static struct usbd_endpoint out_endpoint = {.ep_addr=3, .ep_cb=audio_received};
+static struct usbd_endpoint ds_out_endpoint = {.ep_addr=2, .ep_cb=ds_audio_received};
 static struct usbd_endpoint mic_endpoint = {.ep_addr=0x84, .ep_cb=mic_sent};
 void usbd_audio_open(uint8_t id, uint8_t intf)
 {
     if (id != bus) return;
-    if (intf == 1) {
+    const bool split = dongle_usb_profile_dualsense_split_audio();
+    if (split && intf == 1U) {
+        (void)dongle_ds_haptics_reset(&ds_haptics);
+        ds_opened = true;
+        if (usbd_ep_start_read(bus, 0x02U, ds_haptics_packet, 392U)) ++errors;
+    } else if ((split && intf == 6U) || (!split && intf == 1U)) {
+        const bool ds_quad = !split && dongle_usb_profile() == DONGLE_PROFILE_DUALSENSE;
+        if (ds_quad) {
+            (void)dongle_ds_haptics_reset(&ds_haptics);
+            if (usb_sample_rate_hz != 48000U) {
+                usb_sample_rate_hz = 48000U;
+                dongle_audio_stream_reset(&pcm);
+                dongle_bluetooth_set_usb_sample_rate(48000U);
+            }
+        }
         opened = true;
-        if (usbd_ep_start_read(bus, 3, packet, 388)) ++errors;
+        if (usbd_ep_start_read(bus, 3, packet, ds_quad ? 392U : 388U)) ++errors;
     } else if (intf == 2) {
         dongle_audio_stream_reset(&mic_pcm);
         mic_opened = true;
@@ -209,8 +288,18 @@ void usbd_audio_open(uint8_t id, uint8_t intf)
 void usbd_audio_close(uint8_t id, uint8_t intf)
 {
     if (id != bus) return;
-    if (intf == 1) { opened = false; }
-    else if (intf == 2) {
+    const bool split = dongle_usb_profile_dualsense_split_audio();
+    if (split && intf == 1U) {
+        ds_opened = false;
+        if (dongle_ds_haptics_reset(&ds_haptics)) {
+            dongle_bluetooth_send_dualsense_audio_haptics(0U, 0U, 0U);
+        }
+    } else if ((split && intf == 6U) || (!split && intf == 1U)) {
+        opened = false;
+        if (!split && dongle_ds_haptics_reset(&ds_haptics)) {
+            dongle_bluetooth_send_dualsense_audio_haptics(0U, 0U, 0U);
+        }
+    } else if (intf == 2) {
         mic_opened = false;
         mic_busy = false;
         dongle_audio_stream_reset(&mic_pcm);
@@ -219,8 +308,15 @@ void usbd_audio_close(uint8_t id, uint8_t intf)
 void usbd_audio_set_sampling_freq(uint8_t id, uint8_t ep, uint32_t sampling_freq)
 {
     (void)id;
-    if (ep == 3U && (sampling_freq == 44100U || sampling_freq == 48000U ||
-                     sampling_freq == 96000U)) {
+    if (ep == 0x02U) {
+        return;
+    }
+    const bool ds_quad = dongle_usb_profile() == DONGLE_PROFILE_DUALSENSE &&
+                         !dongle_usb_profile_dualsense_split_audio();
+    const bool valid_rate = ds_quad
+        ? (sampling_freq == 48000U)
+        : (sampling_freq == 44100U || sampling_freq == 48000U || sampling_freq == 96000U);
+    if (ep == 3U && valid_rate) {
         if (usb_sample_rate_hz != sampling_freq) {
             usb_sample_rate_hz = sampling_freq;
             dongle_audio_stream_reset(&pcm);
@@ -231,38 +327,49 @@ void usbd_audio_set_sampling_freq(uint8_t id, uint8_t ep, uint32_t sampling_freq
 uint32_t usbd_audio_get_sampling_freq(uint8_t id, uint8_t ep)
 {
     (void)id;
-    return ep == 0x84 ? 16000U : usb_sample_rate_hz;
+    if (ep == 0x84U) return 16000U;
+    if (ep == 0x02U) return 48000U;
+    if (dongle_usb_profile() == DONGLE_PROFILE_DUALSENSE &&
+        !dongle_usb_profile_dualsense_split_audio()) {
+        return 48000U;
+    }
+    return usb_sample_rate_hz;
 }
 void usbd_audio_set_mute(uint8_t id, uint8_t ep, uint8_t ch, bool mute)
 {
     (void)id; (void)ch;
-    if (ep == 0x84) { mic_muted = mute; }
+    if (ep == 0x02U) { ds_playback_muted = mute; }
+    else if (ep == 0x84U) { mic_muted = mute; }
 }
 bool usbd_audio_get_mute(uint8_t id, uint8_t ep, uint8_t ch)
 {
     (void)id; (void)ch;
-    return ep == 0x84 ? mic_muted : false;
+    if (ep == 0x02U) return ds_playback_muted;
+    return ep == 0x84U ? mic_muted : false;
 }
 void usbd_audio_set_volume(uint8_t id, uint8_t ep, uint8_t ch, int volume_db)
 {
     (void)id; (void)ch;
-    if (ep == 0x84) {
-        if (volume_db < -100) volume_db = -100;
-        if (volume_db > 0) volume_db = 0;
-        mic_volume_db = volume_db;
-    }
+    if (volume_db < -100) volume_db = -100;
+    if (volume_db > 0) volume_db = 0;
+    if (ep == 0x02U) { ds_playback_volume_db = volume_db; }
+    else if (ep == 0x84U) { mic_volume_db = volume_db; }
 }
 int usbd_audio_get_volume(uint8_t id, uint8_t ep, uint8_t ch)
 {
     (void)id; (void)ch;
-    return ep == 0x84 ? mic_volume_db : 0;
+    if (ep == 0x02U) return ds_playback_volume_db;
+    return ep == 0x84U ? mic_volume_db : 0;
 }
 void dongle_usb_audio_event(uint8_t event)
 {
     if (event == USBD_EVENT_CONFIGURED || event == USBD_EVENT_RESUME) configured = true;
     else if (event == USBD_EVENT_RESET || event == USBD_EVENT_DISCONNECTED ||
              event == USBD_EVENT_SUSPEND || event == USBD_EVENT_DEINIT) {
-        configured = opened = mic_opened = mic_busy = false;
+        configured = opened = ds_opened = mic_opened = mic_busy = false;
+        if (dongle_ds_haptics_reset(&ds_haptics)) {
+            dongle_bluetooth_send_dualsense_audio_haptics(0U, 0U, 0U);
+        }
     }
 }
 static void audio_task(void *unused)
@@ -408,22 +515,53 @@ static void audio_task(void *unused)
         }
     }
 }
+void dongle_usb_audio_set_rumble_gain(uint16_t gain_pct)
+{
+    taskENTER_CRITICAL();
+    dongle_ds_haptics_set_gain(&ds_haptics, gain_pct);
+    taskEXIT_CRITICAL();
+}
+uint16_t dongle_usb_audio_get_rumble_gain(void)
+{
+    taskENTER_CRITICAL();
+    const uint16_t gain = dongle_ds_haptics_get_gain(&ds_haptics);
+    taskEXIT_CRITICAL();
+    return gain;
+}
 void dongle_usb_audio_attach(uint8_t id)
 {
     bus = id;
     configured = false;
     opened = false;
+    ds_opened = false;
+    ds_playback_muted = false;
+    ds_playback_volume_db = 0;
     mic_opened = false;
     mic_busy = false;
-    usbd_add_interface(bus, usbd_audio_init_intf(bus, &control, 0x100, audio_entities, 1));
-    usbd_add_interface(bus, usbd_audio_init_intf(bus, &stream, 0x100, audio_entities, 1));
-    usbd_add_interface(bus, usbd_audio_init_intf(bus, &mic_stream, 0x100, audio_entities, 1));
+    const uint8_t n_ent = (uint8_t)(sizeof(audio_entities) / sizeof(audio_entities[0]));
+    usbd_add_interface(bus, usbd_audio_init_intf(bus, &control, 0x100, audio_entities, n_ent));
+    usbd_add_interface(bus, usbd_audio_init_intf(bus, &stream, 0x100, audio_entities, n_ent));
+    usbd_add_interface(bus, usbd_audio_init_intf(bus, &mic_stream, 0x100, audio_entities, n_ent));
     usbd_add_endpoint(bus, &out_endpoint); usbd_add_endpoint(bus, &mic_endpoint);
+    if (dongle_usb_profile_dualsense_split_audio()) {
+        usbd_add_endpoint(bus, &ds_out_endpoint);
+    }
+}
+void dongle_usb_audio_attach_headphone(uint8_t id)
+{
+    bus = id;
+    if (!dongle_usb_profile_dualsense_split_audio()) {
+        return;
+    }
+    const uint8_t n_ent = (uint8_t)(sizeof(audio_entities) / sizeof(audio_entities[0]));
+    usbd_add_interface(bus, usbd_audio_init_intf(bus, &hp_control, 0x100, audio_entities, n_ent));
+    usbd_add_interface(bus, usbd_audio_init_intf(bus, &hp_stream, 0x100, audio_entities, n_ent));
 }
 int dongle_usb_audio_register(uint8_t id)
 {
     const dongle_audio_format_t format = {.sample_rate_hz=44100, .channels=2, .bits_per_sample=16};
     const dongle_audio_format_t mic_format = {.sample_rate_hz=16000, .channels=1, .bits_per_sample=16};
+    dongle_ds_haptics_init(&ds_haptics);
     if (dongle_audio_stream_init(&pcm, storage, sizeof(storage), &format) != DONGLE_AUDIO_STREAM_OK) return -1;
     if (dongle_audio_stream_init(&mic_pcm, mic_storage, sizeof(mic_storage), &mic_format) != DONGLE_AUDIO_STREAM_OK) return -1;
     dongle_usb_audio_attach(id);

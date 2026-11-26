@@ -16,6 +16,7 @@ add_library(dongle_core
     src/core/device_blocklist.c
     src/core/device_catalog.c
     src/core/dualsense.c
+    src/core/dualsense_haptics.c
     src/core/dualsense_mic.c
     src/core/gamepad_router.c
     src/core/hfp_ag.c
@@ -38,6 +39,14 @@ if(BUILD_TESTING)
     add_executable(dualsense_test tests/dualsense_test.c)
     target_link_libraries(dualsense_test PRIVATE dongle_core)
     add_test(NAME dualsense COMMAND dualsense_test)
+    add_executable(dualsense_haptics_test tests/dualsense_haptics_test.c)
+    target_link_libraries(dualsense_haptics_test PRIVATE dongle_core)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(dualsense_haptics_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    elseif(MSVC)
+        target_compile_options(dualsense_haptics_test PRIVATE /W4)
+    endif()
+    add_test(NAME dualsense_haptics COMMAND dualsense_haptics_test)
     add_executable(hid_transport_test tests/hid_transport_test.c)
     target_link_libraries(hid_transport_test PRIVATE dongle_core)
     add_test(NAME hid_transport COMMAND hid_transport_test)

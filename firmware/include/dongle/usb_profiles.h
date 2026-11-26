@@ -15,6 +15,7 @@ uint8_t dongle_usb_profile_gamepad_count(void);
 uint8_t dongle_usb_profile_gamepad_first_interface(void);
 uint8_t dongle_usb_profile_mgmt_interface(void);
 uint8_t dongle_usb_profile_gamepad_out_ep(uint8_t slot);
+bool dongle_usb_profile_dualsense_split_audio(void);
 bool dongle_usb_profile_set_connected_controllers(uint8_t connected_mask);
 uint8_t dongle_usb_profile_request(uint8_t profile, uint8_t codec, bool persist, uint8_t ds_poll_rate);
 size_t dongle_usb_profile_state(uint8_t out[12]);

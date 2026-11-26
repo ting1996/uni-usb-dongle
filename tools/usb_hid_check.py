@@ -596,14 +596,16 @@ def run_dualsense_passthrough_test(port):
 
         out = bytearray(48)
         out[0] = 0x02
-        out[1] = 0x03  # COMPATIBLE_VIBRATION | HAPTICS_SELECT
-        out[2] = 0x04 | 0x08 | 0x10  # R2 trigger | L2 trigger | player LED
-        out[3] = 0x40  # right motor
-        out[4] = 0x20  # left motor
+        out[1] = 0x01 | 0x02 | 0x04 | 0x08  # COMPATIBLE_VIBRATION | HAPTICS_SELECT | R2_TRIGGER | L2_TRIGGER
+        out[2] = 0x04 | 0x10  # LIGHTBAR_CONTROL_ENABLE | PLAYER_INDICATOR_CONTROL_ENABLE
+        out[3] = 0x80  # right motor
+        out[4] = 0x80  # left motor
         out[11] = 0x01  # R2 Continuous trigger effect
-        out[12] = 0x80
+        out[12] = 0x20  # start position
+        out[13] = 0xFF  # force
         out[22] = 0x01  # L2 Continuous trigger effect
-        out[23] = 0x80
+        out[23] = 0x20  # start position
+        out[24] = 0xFF  # force
         out[39] = 0x02
         out[42] = 0x02
         out[43] = 0x00
@@ -616,11 +618,11 @@ def run_dualsense_passthrough_test(port):
         if not kernel32.WriteFile(handle, buf_out, 48, ctypes.byref(written), None) or written.value != 48:
             raise ctypes.WinError(ctypes.get_last_error())
 
-        time.sleep(0.06)
+        time.sleep(1.0)
         out_clear = bytearray(48)
         out_clear[0] = 0x02
-        out_clear[1] = 0x03
-        out_clear[2] = 0x04 | 0x08 | 0x10
+        out_clear[1] = 0x01 | 0x02 | 0x04 | 0x08
+        out_clear[2] = 0x04 | 0x10
         out_clear[11] = 0x05  # Off/reset trigger effect
         out_clear[22] = 0x05
         out_clear[39] = 0x02

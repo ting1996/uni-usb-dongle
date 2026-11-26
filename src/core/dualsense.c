@@ -73,6 +73,7 @@ bool dongle_dualsense_bt_to_usb_input(const uint8_t *data, size_t size,
         if (ds_crc32(0xa1U, data, 74U) != read_le32(data + 74)) return false;
         usb_out[0] = 0x01U;
         memcpy(usb_out + 1, data + 2, 63U);
+        usb_out[54] |= 0x08U;
         return true;
     }
     if (data[0] == 0x01U && size == 10U) {
@@ -88,6 +89,7 @@ bool dongle_dualsense_bt_to_usb_input(const uint8_t *data, size_t size,
         usb_out[33] = 0x80U;
         usb_out[37] = 0x80U;
         usb_out[53] = 0x1aU;
+        usb_out[54] = 0x08U;
         return true;
     }
     return false;

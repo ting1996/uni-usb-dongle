@@ -34,7 +34,7 @@ int main(void)
     uint8_t ds_usb[64] = {0};
     CHECK(dongle_dualsense_bt_to_usb_input(full, 78, ds_usb));
     CHECK(ds_usb[0] == 0x01U && ds_usb[15] == 0x12U && ds_usb[16] == 0x34U &&
-          ds_usb[33] == 0x80U && ds_usb[53] == 0x1aU);
+          ds_usb[33] == 0x80U && ds_usb[53] == 0x1aU && (ds_usb[54] & 0x08U) == 0x08U);
     full[20] ^= 1; CHECK(!dongle_dualsense_input(full,78,out));
     CHECK(!dongle_dualsense_bt_to_usb_input(full, 78, ds_usb));
     full[20] ^= 1; full[9] = 0x2f; sign_report(0xa1U, full);
@@ -48,7 +48,7 @@ int main(void)
     CHECK(ds_usb[0] == 0x01U && ds_usb[1] == 10U && ds_usb[5] == 50U &&
           ds_usb[6] == 60U && ds_usb[8] == 0x28U && ds_usb[9] == 0x81U &&
           ds_usb[10] == 0x03U && ds_usb[33] == 0x80U && ds_usb[37] == 0x80U &&
-          ds_usb[53] == 0x1aU);
+          ds_usb[53] == 0x1aU && (ds_usb[54] & 0x08U) == 0x08U);
 
     uint8_t usb_out[48] = {0x02U, 0x03U, 0x04U, 0x40U, 0x80U};
     usb_out[45] = 0xffU; usb_out[46] = 0x10U; usb_out[47] = 0x20U;

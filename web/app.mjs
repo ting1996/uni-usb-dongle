@@ -19,6 +19,8 @@ import {
   parseMicState,
   parseProfileState,
   parseRadioState,
+  parseRumbleGain,
+  encodeRumbleGain,
   dualsensePollRateLabel,
   profileLabel,
   profileVidPid,
@@ -90,6 +92,10 @@ const elements = {
   audioPeakLeftText: el("audioPeakLeftText"),
   audioPeakRightBar: el("audioPeakRightBar"),
   audioPeakRightText: el("audioPeakRightText"),
+  rumbleGainRange: el("rumbleGainRange"),
+  rumbleGainValue: el("rumbleGainValue"),
+  applyRumbleGainBtn: el("applyRumbleGainBtn"),
+  rumbleGainPresets: Array.from(document.querySelectorAll("[data-rumble-gain]")),
 
   autoRefreshDiag: el("autoRefreshDiag"),
   refreshDiagBtn: el("refreshDiagBtn"),
@@ -219,6 +225,7 @@ function outPathLabel(flags) {
   if (flags & 0x02) parts.push("SET_REPORT");
   if (flags & 0x04) parts.push("Dedicated F1");
   if (flags & 0x08) parts.push("Translated");
+  if (flags & 0x10) parts.push("Audio Haptics");
   return `${parts.join(" + ")} (0x${flags.toString(16).toUpperCase().padStart(2, "0")})`;
 }
 
@@ -252,6 +259,12 @@ function syncUiEnabled() {
   const micSupported = snapshot.micState !== null;
   elements.micSourceSelect.disabled = !canControl || !micSupported;
   elements.applyMicSourceBtn.disabled = !canControl || !micSupported;
+  const rumbleSupported = snapshot.rumbleGain !== null;
+  elements.rumbleGainRange.disabled = !canControl || !rumbleSupported;
+  elements.applyRumbleGainBtn.disabled = !canControl || !rumbleSupported;
+  for (const btn of elements.rumbleGainPresets) {
+    btn.disabled = !canControl || !rumbleSupported;
+  }
 
   elements.refreshDiagBtn.disabled = !canControl;
   elements.copyDiagBtn.disabled = !connected;
@@ -277,6 +290,7 @@ function resetSnapshot() {
     radioState: null,
     audioMetrics: null,
     micState: null,
+    rumbleGain: null,
     blocklist: null,
     gamepadDiagnostics: [null, null],
     dualsenseMetrics: [null, null],
@@ -644,6 +658,13 @@ function renderBlocklist() {
   }
 }
 
+function formatRumbleGainLabel(gainPct) {
+  if (gainPct === 0) return "0% (Off)";
+  if (gainPct < 100) return `${gainPct}% (-${100 - gainPct}% Loss)`;
+  if (gainPct === 100) return "100% (Normal)";
+  return `${gainPct}% (+${gainPct - 100}% Gain)`;
+}
+
 function renderAudioAndMic() {
   const mic = snapshot.micState;
   const audio = snapshot.audioMetrics;
@@ -695,6 +716,14 @@ function renderAudioAndMic() {
   elements.audioBytes.textContent = radio
     ? `${radio.received} RX / ${radio.sent} BT (U:${radio.underflows} O:${radio.overflows} E:${radio.errors})`
     : "--";
+
+  if (snapshot.rumbleGain !== null) {
+    elements.rumbleGainRange.value = String(snapshot.rumbleGain.gainPct);
+    elements.rumbleGainValue.textContent = formatRumbleGainLabel(snapshot.rumbleGain.gainPct);
+  } else {
+    elements.rumbleGainRange.value = "100";
+    elements.rumbleGainValue.textContent = "--";
+  }
 }
 
 function makeKvTable(rows) {
@@ -880,6 +909,9 @@ async function refreshMetricsAndDiag() {
 
     const micRaw = await requestOptional(COMMAND.getMicConfig);
     if (micRaw) snapshot.micState = parseMicState(micRaw);
+
+    const rumbleRaw = await requestOptional(COMMAND.getRumbleGain);
+    if (rumbleRaw) snapshot.rumbleGain = parseRumbleGain(rumbleRaw);
 
     const gp0 = await requestOptional(COMMAND.getGamepadDiagnostics, Uint8Array.of(0));
     const gp1 = await requestOptional(COMMAND.getGamepadDiagnostics, Uint8Array.of(1));
@@ -1185,6 +1217,15 @@ async function handleApplyMicSource() {
   renderDiagnostics();
 }
 
+async function handleApplyRumbleGain(gainPct) {
+  const reply = await sendChecked(COMMAND.setRumbleGain, encodeRumbleGain(gainPct));
+  snapshot.rumbleGain = parseRumbleGain(reply);
+  const label = formatRumbleGainLabel(snapshot.rumbleGain.gainPct);
+  appendLog(`DualSense rumble gain set to ${label}.`);
+  setStatus(`Rumble gain saved: ${label}.`);
+  renderAudioAndMic();
+}
+
 async function handleUploadOta() {
   if (!transportClient || !otaImage) return;
   busy = true;
@@ -1357,6 +1398,30 @@ function wireEvents() {
       setStatus(`Mic source change failed: ${error.message}`);
     }
   });
+
+  elements.rumbleGainRange.addEventListener("input", () => {
+    elements.rumbleGainValue.textContent = formatRumbleGainLabel(Number(elements.rumbleGainRange.value));
+  });
+
+  elements.applyRumbleGainBtn.addEventListener("click", async () => {
+    try {
+      await handleApplyRumbleGain(Number(elements.rumbleGainRange.value));
+    } catch (error) {
+      appendLog(`Rumble gain change failed: ${error.message}`);
+      setStatus(`Rumble gain change failed: ${error.message}`);
+    }
+  });
+
+  for (const btn of elements.rumbleGainPresets) {
+    btn.addEventListener("click", async () => {
+      try {
+        await handleApplyRumbleGain(Number(btn.dataset.rumbleGain));
+      } catch (error) {
+        appendLog(`Rumble gain change failed: ${error.message}`);
+        setStatus(`Rumble gain change failed: ${error.message}`);
+      }
+    });
+  }
 
   elements.refreshDiagBtn.addEventListener("click", () => refreshMetricsAndDiag());
 

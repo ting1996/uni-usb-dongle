@@ -28,6 +28,9 @@ void dongle_bluetooth_send_dualsense_output(
     uint8_t slot, const uint8_t *usb_report, size_t size);
 void dongle_bluetooth_send_dualsense_output_ex(
     uint8_t slot, const uint8_t *usb_report, size_t size, uint8_t path_flags);
+void dongle_bluetooth_send_dualsense_audio_haptics(
+    uint8_t slot, uint8_t motor_left, uint8_t motor_right);
+void dongle_bluetooth_set_rumble_gain(uint16_t gain_pct);
 bool dongle_bluetooth_send_dualsense_feature(
     uint8_t slot, const uint8_t *usb_report, size_t size);
 bool dongle_bluetooth_dualsense_metrics(

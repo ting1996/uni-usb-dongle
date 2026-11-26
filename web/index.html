@@ -251,6 +251,28 @@
           </div>
         </div>
       </section>
+
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <h2>DualSense Rumble Gain / Loss</h2>
+            <p class="muted">Adjust DualSense rumble intensity from <strong>0%</strong> (Off) and <strong>50%</strong> (Loss) up to <strong>400%</strong> (Gain). Saved persistently on the dongle.</p>
+          </div>
+          <strong id="rumbleGainValue">100% (Normal)</strong>
+        </div>
+        <div class="form-row">
+          <input id="rumbleGainRange" type="range" min="0" max="400" step="5" value="100" aria-label="DualSense rumble gain percentage" disabled>
+          <button id="applyRumbleGainBtn" class="btn-primary" disabled>Apply Rumble Gain</button>
+        </div>
+        <div class="form-row">
+          <button type="button" class="btn-subtle" data-rumble-gain="0" disabled>0% Off</button>
+          <button type="button" class="btn-subtle" data-rumble-gain="50" disabled>50% Loss</button>
+          <button type="button" class="btn-subtle" data-rumble-gain="100" disabled>100% Normal</button>
+          <button type="button" class="btn-subtle" data-rumble-gain="200" disabled>200% Gain</button>
+          <button type="button" class="btn-subtle" data-rumble-gain="300" disabled>300% Gain</button>
+          <button type="button" class="btn-subtle" data-rumble-gain="400" disabled>400% Max</button>
+        </div>
+      </section>
     </section>
 
     <section class="tabpanel" role="tabpanel" id="panel-diagnostics" aria-labelledby="tabBtn-diagnostics" data-panel="diagnostics" hidden>
