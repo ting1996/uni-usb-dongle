@@ -512,7 +512,7 @@ function renderHeadphone() {
       disabled: !targetAddr,
     }),
     makeButton("Remove", () => handleRemoveAudio(), {
-      disabled: !hpAddr && !radio.audioConnected,
+      disabled: !targetAddr,
     }),
     makeButton("Never Connect", () => handleBlockAddress(targetAddr), {
       disabled: !targetAddr || snapshot.blocklist === null,
@@ -537,6 +537,16 @@ function renderDiscovery() {
   }
 
   const blockedSet = new Set(snapshot.blocklist || []);
+  const pairedControllers = new Map(
+    (snapshot.deviceState?.controllers || [])
+      .filter((c) => c.paired)
+      .map((c) => [c.address.toUpperCase(), c.slot]),
+  );
+  const pairedHeadphone = snapshot.radioState?.headphone &&
+    snapshot.radioState.headphone !== "00:00:00:00:00:00"
+    ? snapshot.radioState.headphone.toUpperCase()
+    : null;
+
   for (const entry of discoveryEntries) {
     const row = document.createElement("div");
     row.className = "device-row";
@@ -552,11 +562,25 @@ function renderDiscovery() {
 
     const actions = document.createElement("div");
     actions.className = "device-row-actions";
+    const addrUpper = entry.address.toUpperCase();
+    const pairedSlot = pairedControllers.get(addrUpper);
+    const isPairedHeadphone = pairedHeadphone === addrUpper;
     const isBlocked = blockedSet.has(entry.address);
     if (isBlocked) {
       actions.append(makePill("Blocked (Never Connect)", "pill-danger"));
       actions.append(makeButton("Unblock", () => handleUnblockAddress(entry.address)));
     } else {
+      if (pairedSlot !== undefined) {
+        actions.append(
+          makePill(`Paired Slot ${pairedSlot + 1}`, "pill-ok"),
+          makeButton("Remove", () => handleRemoveSlot(pairedSlot)),
+        );
+      } else if (isPairedHeadphone) {
+        actions.append(
+          makePill("Paired Headphone", "pill-ok"),
+          makeButton("Remove", () => handleRemoveAudio()),
+        );
+      }
       actions.append(
         makeButton("Pair Controller", () => handlePairDevice(COMMAND.pairController, entry.address, "controller"), {
           disabled: !(capabilities & CAPABILITY.bluetoothHid),
@@ -1018,10 +1042,13 @@ async function handleRemoveSlot(slot) {
 }
 
 async function handleRemoveAudio() {
-  const reply = await requestOptional(COMMAND.removeAudio);
-  if (!reply) {
+  const reply = await transportClient.request(COMMAND.removeAudio, new Uint8Array(), 4000);
+  if (reply[0] === STATUS.invalidCommand || reply[0] === STATUS.unsupported) {
     setStatus("Remove paired headphone requires v1.1.0+ firmware.");
     return;
+  }
+  if (reply[0] !== STATUS.ok) {
+    throw new Error(`Command 0x${COMMAND.removeAudio.toString(16)} failed: ${statusMessage(reply[0])}`);
   }
   appendLog("Removed paired Bluetooth headphone.");
   await refreshAll();
