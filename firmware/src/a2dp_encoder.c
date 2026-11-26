@@ -124,15 +124,13 @@ int dongle_a2dp_encoder_open(dongle_audio_codec_t codec,
             }
             /* channel_mode 0x01 = LDACBT_CHANNEL_MODE_STEREO */
             if (ldacBT_init_handle_encode(enc_state->u.ldac.handle,
-                                          ldac_mtu, LDACBT_EQMID_MQ, 0x01,
+                                          ldac_mtu,
+                                          controller_active ? LDACBT_EQMID_SQ : LDACBT_EQMID_HQ,
+                                          0x01,
                                           LDACBT_SMPL_FMT_S16,
                                           (int)sample_rate_hz) != 0) {
                 dongle_a2dp_encoder_close();
                 return -1;
-            }
-            if (controller_active) {
-                (void)ldacBT_alter_eqmid_priority(enc_state->u.ldac.handle,
-                                                  LDACBT_EQMID_INC_CONNECTION);
             }
             return 0;
         }
@@ -191,11 +189,9 @@ void dongle_a2dp_encoder_set_controller_active(bool controller_active)
     switch (enc_state->codec) {
         case DONGLE_AUDIO_CODEC_LDAC:
             if (enc_state->u.ldac.handle != NULL) {
-                (void)ldacBT_set_eqmid(enc_state->u.ldac.handle, LDACBT_EQMID_MQ);
-                if (controller_active) {
-                    (void)ldacBT_alter_eqmid_priority(enc_state->u.ldac.handle,
-                                                      LDACBT_EQMID_INC_CONNECTION);
-                }
+                (void)ldacBT_set_eqmid(
+                    enc_state->u.ldac.handle,
+                    controller_active ? LDACBT_EQMID_SQ : LDACBT_EQMID_HQ);
             }
             break;
         case DONGLE_AUDIO_CODEC_SBC:

@@ -38,6 +38,10 @@ bool dongle_usb_gamepad_sink(void *context, uint8_t gamepad_index,
 /* Raw 64-byte DualSense USB input passthrough (report ID 0x01). */
 bool dongle_usb_gamepad_dualsense_raw(uint8_t gamepad_index,
                                       const uint8_t report[64]);
+bool dongle_usb_gamepad_submit_dualsense(uint8_t index,
+                                         const uint8_t *report,
+                                         size_t size,
+                                         const uint8_t raw_ds[64]);
 void dongle_usb_gamepad_dualsense_clear(uint8_t gamepad_index);
 
 /* Explicit bench diagnostic; automatically releases input after 500 ms. */

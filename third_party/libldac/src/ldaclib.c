@@ -24,6 +24,10 @@
 #include "setpcm_ldac.c"
 #else /* _32BIT_FIXED_POINT */
 #include "tables_sigproc_fixp_ldac.c"
+#ifdef LDAC_TCM_CODE
+#undef DECLFUNC
+#define DECLFUNC static __attribute__((section(".tcm_code")))
+#endif
 #include "setpcm_fixp_ldac.c"
 #include "func_fixp_ldac.c"
 #endif /* _32BIT_FIXED_POINT */

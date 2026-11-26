@@ -362,7 +362,8 @@ static void audio_task(void *unused)
             epoch = now;
             frames = 0;
         }
-        if ((now - epoch) * bt_rate < frames * 1000000ULL) {
+        const size_t high_water = (size_t)((usb_rate * 80ULL) / 1000ULL) * 4U;
+        if (available < high_water && (now - epoch) * bt_rate < frames * 1000000ULL) {
             vTaskDelay(1);
             continue;
         }
@@ -381,9 +382,13 @@ static void audio_task(void *unused)
                 src_pcm = bt_pcm;
             }
             size_t pdu_len = 0U;
-            if (dongle_a2dp_encoder_encode(src_pcm, bt_frames, media_pdu,
-                                           sizeof(media_pdu), &pdu_len) == 0) {
-                if (pdu_len > 0U && dongle_bluetooth_send_a2dp_media(media_pdu, pdu_len) < 0) {
+            const int enc_rc = dongle_a2dp_encoder_encode(src_pcm, bt_frames, media_pdu,
+                                                          sizeof(media_pdu), &pdu_len);
+            if (enc_rc == 0) {
+                const int snd_rc = (pdu_len > 0U)
+                    ? dongle_bluetooth_send_a2dp_media(media_pdu, pdu_len)
+                    : 0;
+                if (pdu_len > 0U && snd_rc < 0) {
                     ++errors;
                     if (now - last_congestion_us >= 500000ULL) {
                         last_congestion_us = now;
@@ -423,7 +428,7 @@ int dongle_usb_audio_register(uint8_t id)
     if (dongle_audio_stream_init(&mic_pcm, mic_storage, sizeof(mic_storage), &mic_format) != DONGLE_AUDIO_STREAM_OK) return -1;
     dongle_usb_audio_attach(id);
     if (audio_task_handle != NULL) return 0;
-    return xTaskCreate(audio_task, "usb_audio", 3072, NULL, 4, &audio_task_handle) == pdPASS ? 0 : -1;
+    return xTaskCreate(audio_task, "usb_audio", 3072, NULL, 5, &audio_task_handle) == pdPASS ? 0 : -1;
 }
 void dongle_usb_audio_set_ota_suspended(bool suspended)
 {

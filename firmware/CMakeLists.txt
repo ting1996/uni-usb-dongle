@@ -59,15 +59,22 @@ set(VO_AACENC_SOURCES
     ../third_party/vo-aacenc/aacenc/src/tns.c
     ../third_party/vo-aacenc/aacenc/src/transform.c
 )
-set(THIRD_PARTY_CODEC_SOURCES
+set(LDAC_SOURCES
     ../third_party/libldac/src/ldaclib.c
     ../third_party/libldac/src/ldacBT.c
+)
+set(THIRD_PARTY_CODEC_SOURCES
+    ${LDAC_SOURCES}
     ../third_party/libopenaptx/openaptx.c
     ${VO_AACENC_SOURCES}
 )
 set_source_files_properties(${THIRD_PARTY_CODEC_SOURCES} PROPERTIES
     COMPILE_DEFINITIONS "__unused=;_32BIT_FIXED_POINT=1"
     COMPILE_OPTIONS "-O2;-Wno-unused-parameter;-Wno-sign-compare;-Wno-unused-variable;-Wno-unused-but-set-variable;-Wno-implicit-fallthrough;-Wno-maybe-uninitialized"
+)
+set_source_files_properties(${LDAC_SOURCES} PROPERTIES
+    COMPILE_DEFINITIONS "__unused=;_32BIT_FIXED_POINT=1;LDAC_TCM_CODE=1"
+    COMPILE_OPTIONS "-O3;-Wno-unused-parameter;-Wno-sign-compare;-Wno-unused-variable;-Wno-unused-but-set-variable;-Wno-implicit-fallthrough;-Wno-maybe-uninitialized"
 )
 target_sources(app PRIVATE
     ../src/core/a2dp_packetizer.c

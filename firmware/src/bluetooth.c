@@ -638,10 +638,19 @@ static int receive_input(struct bt_l2cap_chan *chan, struct net_buf *buf)
                 }
                 ds_unlock(locked);
             }
-            dongle_usb_gamepad_sink(NULL, p->slot, report, sizeof(report));
             uint8_t ds_usb[DONGLE_DUALSENSE_USB_INPUT_SIZE];
-            if (dongle_dualsense_bt_to_usb_input(buf->data + 1, buf->len - 1, ds_usb)) {
-                dongle_usb_gamepad_dualsense_raw(p->slot, ds_usb);
+            bool has_raw = false;
+            if (buf->data[1] == 0x31U && buf->len - 1U == 78U) {
+                ds_usb[0] = 0x01U;
+                memcpy(ds_usb + 1U, buf->data + 3U, 63U);
+                has_raw = true;
+            } else {
+                has_raw = dongle_dualsense_bt_to_usb_input(buf->data + 1, buf->len - 1, ds_usb);
+            }
+            if (has_raw) {
+                dongle_usb_gamepad_submit_dualsense(p->slot, report, sizeof(report), ds_usb);
+            } else {
+                dongle_usb_gamepad_sink(NULL, p->slot, report, sizeof(report));
             }
         }
 #ifdef DONGLE_BT_SIGNAL_TRACE
@@ -1362,9 +1371,9 @@ static int configure_qos(struct bt_conn *connection, bool is_audio)
     cp->flags = 0U;
     if (is_audio) {
         cp->service_type = 0x02U; /* Guaranteed */
-        cp->token_rate = sys_cpu_to_le32(45000U);
+        cp->token_rate = sys_cpu_to_le32(135000U);
         cp->peak_bandwidth = 0U;
-        cp->latency = sys_cpu_to_le32(15000U);
+        cp->latency = sys_cpu_to_le32(5000U);
     } else {
         cp->service_type = 0x01U; /* Best Effort */
         cp->token_rate = 0U;

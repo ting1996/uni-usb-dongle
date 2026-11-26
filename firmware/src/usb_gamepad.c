@@ -218,7 +218,7 @@ static uint32_t ds_sensor_ts_step(dongle_dualsense_poll_rate_t rate)
     return 12000U;
 }
 
-static size_t encode_gamepad_report(
+static DONGLE_TCM_CODE size_t encode_gamepad_report(
     uint8_t slot, dongle_output_profile_t profile, uint8_t out[64])
 {
     if (profile == DONGLE_PROFILE_DUALSENSE && raw_ds_valid[slot] &&
@@ -414,6 +414,35 @@ bool dongle_usb_gamepad_dualsense_raw(uint8_t index, const uint8_t report[64])
     return accepted;
 }
 
+bool dongle_usb_gamepad_submit_dualsense(uint8_t index,
+                                         const uint8_t *report,
+                                         size_t size,
+                                         const uint8_t raw_ds[64])
+{
+    if (index >= DONGLE_USB_GAMEPAD_COUNT || report == NULL ||
+        size != DONGLE_USB_GAMEPAD_REPORT_SIZE || report[8] > 8U ||
+        raw_ds == NULL || raw_ds[0] != 1U) {
+        return false;
+    }
+    bool accepted = false;
+    bool should_notify = false;
+    taskENTER_CRITICAL();
+    if (configured && !reset_pending) {
+        memcpy(reports[index], report, size);
+        memcpy(raw_ds_reports[index], raw_ds, 64U);
+        raw_ds_valid[index] = true;
+        test_active[index] = false;
+        pending[index] = true;
+        accepted = true;
+        should_notify = !busy[index];
+    }
+    taskEXIT_CRITICAL();
+    if (should_notify && gamepad_task_handle != NULL) {
+        (void)xTaskNotifyGive(gamepad_task_handle);
+    }
+    return accepted;
+}
+
 void dongle_usb_gamepad_dualsense_clear(uint8_t index)
 {
     if (index >= DONGLE_USB_GAMEPAD_COUNT) {
@@ -450,7 +479,7 @@ bool dongle_usb_gamepad_diagnostics(uint8_t index, uint8_t *payload)
     return true;
 }
 
-static void gamepad_task(void *argument)
+static DONGLE_TCM_CODE void gamepad_task(void *argument)
 {
     (void)argument;
     for (;;) {

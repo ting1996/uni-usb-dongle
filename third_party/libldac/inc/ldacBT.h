@@ -20,7 +20,11 @@
 extern "C" {
 #endif
 #ifndef LDACBT_API
+#ifdef LDAC_TCM_CODE
+#define LDACBT_API __attribute__((section(".tcm_code")))
+#else
 #define LDACBT_API
+#endif
 #endif /* LDACBT_API  */
 
 /* This file contains the definitions, declarations and macros for an implimentation of 

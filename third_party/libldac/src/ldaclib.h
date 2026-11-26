@@ -41,7 +41,11 @@ typedef int LDAC_RESULT;
 #define LDAC_SUCCEEDED(result) ((LDAC_RESULT)(result)>=0)
 #define LDAC_FAILED(result)    ((LDAC_RESULT)(result)<0)
 
+#ifdef LDAC_TCM_CODE
+#define DECLSPEC __attribute__((section(".tcm_code")))
+#else
 #define DECLSPEC
+#endif
 
 typedef struct _handle_ldac_struct *HANDLE_LDAC;
 
