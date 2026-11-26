@@ -123,6 +123,18 @@ export function parseDiscoveryResult(bytes) {
     rssi: bytes[8] > 127 ? bytes[8] - 256 : bytes[8], name: new TextDecoder().decode(name) };
 }
 
+export function computeDeltaRate(prevValue, currValue, elapsedMs, scale = 1000) {
+  if (
+    prevValue === null || prevValue === undefined ||
+    currValue === null || currValue === undefined ||
+    !Number.isFinite(elapsedMs) || elapsedMs <= 0 ||
+    currValue < prevValue
+  ) {
+    return null;
+  }
+  return ((currValue - prevValue) * scale) / elapsedMs;
+}
+
 export function parseRadioState(bytes) {
   if (![33, 44].includes(bytes.length) || bytes[0] !== STATUS.ok) throw new TypeError("Invalid radio state");
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);

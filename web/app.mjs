@@ -5,6 +5,7 @@ import {
   CAPABILITY,
   SerialProtocol,
   addressBytes,
+  computeDeltaRate,
   encodeFrame,
   headphoneStatus,
   micCodecLabel,
@@ -129,6 +130,12 @@ let snapshot = {
   blocklist: null,
   gamepadDiagnostics: [null, null],
   dualsenseMetrics: [null, null],
+};
+let prevDiagSample = null;
+let liveRates = {
+  headphoneKbps: null,
+  gamepadHz: [null, null],
+  dualsenseHz: [null, null],
 };
 
 function appendLog(message) {
@@ -273,6 +280,12 @@ function resetSnapshot() {
     blocklist: null,
     gamepadDiagnostics: [null, null],
     dualsenseMetrics: [null, null],
+  };
+  prevDiagSample = null;
+  liveRates = {
+    headphoneKbps: null,
+    gamepadHz: [null, null],
+    dualsenseHz: [null, null],
   };
   discoveryEntries = [];
 }
@@ -731,7 +744,16 @@ function renderDiagnostics() {
     audioCard.className = "diag-card";
     const h3a = document.createElement("h3");
     h3a.textContent = "USB Audio & HFP Link";
+    const activeCodecLabel = snapshot.profileState && snapshot.profileState.activeCodec !== null
+      ? snapshot.profileState.activeCodecLabel
+      : "A2DP";
+    const bitrateText = !radio.streaming
+      ? "0 kbps (Idle)"
+      : liveRates.headphoneKbps !== null
+        ? `${liveRates.headphoneKbps.toFixed(1)} kbps (${activeCodecLabel})`
+        : `Measuring... (${activeCodecLabel})`;
     audioCard.append(h3a, makeKvTable([
+      ["Headphone Bitrate", bitrateText],
       ["USB RX / BT TX Bytes", `${radio.received} / ${radio.sent}`],
       ["Underflow / Overflow / Err", `${radio.underflows} / ${radio.overflows} / ${radio.errors}`],
       ["HFP SLC Ready / SCO Open", audio ? `${audio.hfpSlcReady} / ${audio.hfpScoOpen}` : "--"],
@@ -741,6 +763,10 @@ function renderDiagnostics() {
   }
 
   elements.diagGamepadBox.replaceChildren();
+  const targetPollSuffix = snapshot.profileState?.dsPollSupported &&
+    snapshot.profileState.active === OUTPUT_PROFILE.dualsense
+    ? ` (Target: ${snapshot.profileState.dsPollRateLabel})`
+    : "";
   for (let slot = 0; slot < 2; slot += 1) {
     const gp = snapshot.gamepadDiagnostics[slot];
     const card = document.createElement("div");
@@ -754,7 +780,13 @@ function renderDiagnostics() {
       card.append(title, p);
     } else {
       const hex = gp.report.map((b) => b.toString(16).padStart(2, "0")).join(" ");
+      const pollRateText = !gp.configured
+        ? `0 Hz (Idle)${targetPollSuffix}`
+        : liveRates.gamepadHz[slot] !== null
+          ? `${liveRates.gamepadHz[slot].toFixed(1)} Hz${targetPollSuffix}`
+          : `Measuring...${targetPollSuffix}`;
       card.append(title, makeKvTable([
+        ["Polling Rate", pollRateText],
         ["Configured / Busy / Pending", `${gp.configured} / ${gp.busy} / ${gp.pending}`],
         ["Submitted / Completed", `${gp.submitted} / ${gp.completed}`],
         ["Tick / Test Active", `${gp.tickCount} / ${gp.testActive}`],
@@ -777,8 +809,14 @@ function renderDiagnostics() {
       p.textContent = transportClient ? "Unavailable" : "Disconnected";
       card.append(title, p);
     } else {
+      const btInputRateText = !ds.interruptOpen
+        ? "0 Hz (Idle)"
+        : liveRates.dualsenseHz[slot] !== null
+          ? `${liveRates.dualsenseHz[slot].toFixed(1)} Hz`
+          : "Measuring...";
       card.append(title, makeKvTable([
         ["BT L2CAP (ACL/Auth/Ctrl/Int)", `${ds.aclConnected}/${ds.authenticated}/${ds.controlOpen}/${ds.interruptOpen}`],
+        ["BT Input Rate", btInputRateText],
         ["LED Unlocked / Probe Mask", `${ds.ledUnlocked} / 0x${ds.featMask.toString(16).padStart(2, "0")}`],
         ["BT IN (0x31 / 0x01)", `${ds.btIn31} / ${ds.btIn01}`],
         ["USB OUT 0x02 Received", ds.usbOut02],
@@ -856,6 +894,26 @@ async function refreshMetricsAndDiag() {
       ds0 ? parseDualsenseMetrics(ds0) : null,
       ds1 ? parseDualsenseMetrics(ds1) : null,
     ];
+
+    const nowMs = performance.now();
+    const gpCompleted = snapshot.gamepadDiagnostics.map((gp) => (gp ? gp.completed : null));
+    const dsBtIn = snapshot.dualsenseMetrics.map((ds) => (ds ? ds.btIn31 + ds.btIn01 : null));
+    const radioSent = snapshot.radioState ? snapshot.radioState.sent : null;
+    if (prevDiagSample) {
+      const elapsedMs = nowMs - prevDiagSample.atMs;
+      liveRates = {
+        headphoneKbps: computeDeltaRate(prevDiagSample.radioSent, radioSent, elapsedMs, 8),
+        gamepadHz: [
+          computeDeltaRate(prevDiagSample.gpCompleted[0], gpCompleted[0], elapsedMs, 1000),
+          computeDeltaRate(prevDiagSample.gpCompleted[1], gpCompleted[1], elapsedMs, 1000),
+        ],
+        dualsenseHz: [
+          computeDeltaRate(prevDiagSample.dsBtIn[0], dsBtIn[0], elapsedMs, 1000),
+          computeDeltaRate(prevDiagSample.dsBtIn[1], dsBtIn[1], elapsedMs, 1000),
+        ],
+      };
+    }
+    prevDiagSample = { atMs: nowMs, radioSent, gpCompleted, dsBtIn };
 
     renderOverviewAndProfile();
     renderHeadphone();

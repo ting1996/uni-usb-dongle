@@ -7,6 +7,7 @@ import {
   MIC_SOURCE,
   MIC_CODEC,
   addressBytes,
+  computeDeltaRate,
   dualsensePollRateLabel,
   parseDiscoveryResult,
   parseRadioState,
@@ -178,4 +179,12 @@ test("v1.1 DualSense, gamepad diagnostics, mic config, and blocklist parsers dec
   const bl = Uint8Array.of(0, 2, 6, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
   assert.deepEqual(parseBlocklist(bl), ["AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66"]);
   assert.throws(() => parseBlocklist(Uint8Array.of(0, 2, 6, 0xaa)));
+});
+
+test("computeDeltaRate calculates live headphone bitrate (kbps) and controller polling rate (Hz)", () => {
+  assert.equal(computeDeltaRate(1000, 124000, 1000, 8), 984);
+  assert.equal(computeDeltaRate(500, 1000, 1000, 1000), 500);
+  assert.equal(computeDeltaRate(null, 100, 1000, 1000), null);
+  assert.equal(computeDeltaRate(200, 100, 1000, 1000), null);
+  assert.equal(computeDeltaRate(100, 200, 0, 1000), null);
 });
