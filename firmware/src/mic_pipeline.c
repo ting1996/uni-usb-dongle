@@ -398,7 +398,7 @@ static void drain_sco_ring(uint8_t *reasm, size_t *reasm_len, uint8_t active_src
     }
 }
 
-static void drain_opus_ring(uint8_t active_src, bool usb_open)
+static DONGLE_TCM_CODE void drain_opus_ring(uint8_t active_src, bool usb_open)
 {
     static int16_t opus_pcm_48k[480];
 

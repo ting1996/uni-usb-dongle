@@ -69,3 +69,8 @@ int main(void)
     LOG_E("FreeRTOS scheduler returned\r\n");
     return 1;
 }
+
+void vApplicationIdleHook(void)
+{
+    __asm volatile("wfi");
+}

@@ -737,6 +737,8 @@ static void finish_update(
     }
     resume_other_tasks_after_ota();
     vTaskDelay(pdMS_TO_TICKS(100U));
+    (void)usbd_deinitialize(USB_OTA_BUS_ID);
+    vTaskDelay(pdMS_TO_TICKS(250U));
     bl_sys_reset_por();
     for (;;) {
         vTaskDelay(portMAX_DELAY);

@@ -69,6 +69,7 @@ int main(void)
     CHECK(dongle_dualsense_feature_size(0x08U) == 48U);
     CHECK(dongle_dualsense_feature_size(0x09U) == 20U);
     CHECK(dongle_dualsense_feature_size(0x20U) == 64U);
+    CHECK(dongle_dualsense_feature_size(0x22U) == 64U);
     CHECK(dongle_dualsense_feature_size(0x80U) == 64U);
     CHECK(dongle_dualsense_feature_size(0x81U) == 64U);
     CHECK(dongle_dualsense_feature_size(0x00U) == 0U);
@@ -76,7 +77,7 @@ int main(void)
     CHECK(dongle_dualsense_feature_size(0x99U) == 0U);
 
     static const struct { uint8_t id; size_t size; } feat_cases[] = {
-        { 0x05U, 41U }, { 0x08U, 48U }, { 0x09U, 20U }, { 0x20U, 64U }, { 0x81U, 64U }
+        { 0x05U, 41U }, { 0x08U, 48U }, { 0x09U, 20U }, { 0x20U, 64U }, { 0x22U, 64U }, { 0x81U, 64U }
     };
     for (size_t c = 0; c < sizeof(feat_cases) / sizeof(feat_cases[0]); ++c) {
         const uint8_t id = feat_cases[c].id;
@@ -159,7 +160,7 @@ int main(void)
     dongle_dualsense_bt_unlock_leds(0x27U, unlock_bt);
     CHECK(unlock_bt[0] == 0x31U && unlock_bt[1] == 0x70U && unlock_bt[2] == 0x10U &&
           unlock_bt[4] == 0x40U && unlock_bt[39] == 0x00U &&
-          unlock_bt[41] == 0x02U && unlock_bt[44] == 0x02U);
+          unlock_bt[41] == 0x03U && unlock_bt[44] == 0x02U);
     memcpy(expected_bt, unlock_bt, sizeof(unlock_bt));
     sign_report(0xa2U, expected_bt);
     CHECK(memcmp(unlock_bt + 74, expected_bt + 74, 4U) == 0);

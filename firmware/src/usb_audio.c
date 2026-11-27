@@ -3,12 +3,15 @@
 #include "dongle/a2dp_packetizer.h"
 #include "dongle/audio_stream.h"
 #include "dongle/bluetooth.h"
+#include "dongle/dualsense_audio.h"
 #include "dongle/dualsense_haptics.h"
 #include "dongle/usb_profiles.h"
+#include "opus/opus.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "usbd_core.h"
 #include "bflb_mtimer.h"
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -47,6 +50,18 @@ static dongle_ds_haptics_t ds_haptics;
 static uint8_t ds_stereo_scratch[196];
 static volatile bool ds_opened, ds_playback_muted;
 static volatile int ds_playback_volume_db;
+static int16_t ds_pcm_ring[2][DONGLE_DS_AUDIO_ACCUM_SAMPLES * 4U];
+static volatile uint32_t ds_pcm_wr_pos;
+static volatile uint8_t ds_pcm_wr_idx;
+static volatile bool ds_pcm_ready;
+static __attribute__((aligned(8))) uint8_t ds_opus_enc_mem[36864];
+static OpusEncoder *ds_opus_enc;
+static int ds_opus_force_channels;
+static TaskHandle_t ds_audio_task_handle;
+static StaticTask_t ds_audio_tcb;
+static StackType_t ds_audio_stack[6144];
+static volatile bool ds_audio_ota_suspend_req;
+static volatile bool ds_audio_ota_suspended;
 static struct usbd_interface control, stream, mic_stream, hp_control, hp_stream;
 static struct audio_entity_info audio_entities[] = {
     { .bEntityId = 2, .bDescriptorSubtype = AUDIO_CONTROL_FEATURE_UNIT, .ep = 0x02 },
@@ -123,22 +138,30 @@ static DONGLE_TCM_CODE void ds_audio_received(uint8_t id, uint8_t ep, uint32_t s
 {
     if (id != bus || ep != 0x02U || !ds_opened) return;
     if (size > 0U && size <= 392U && (size % 8U) == 0U) {
-        if (ds_playback_muted) {
-            if (dongle_ds_haptics_reset(&ds_haptics)) {
-                dongle_bluetooth_send_dualsense_audio_haptics(0U, 0U, 0U);
-            }
-        } else {
-            uint8_t motor_l = 0U;
-            uint8_t motor_r = 0U;
-            bool haptics_changed = false;
-            if (dongle_ds_haptics_process_4ch(
-                    &ds_haptics, ds_haptics_packet, size, NULL, NULL,
-                    NULL, NULL, &motor_l, &motor_r, &haptics_changed)) {
-                if (haptics_changed) {
-                    dongle_bluetooth_send_dualsense_audio_haptics(0U, motor_l, motor_r);
+        const int16_t *src = (const int16_t *)ds_haptics_packet;
+        const uint32_t total = size / sizeof(int16_t);
+        const uint32_t cap = DONGLE_DS_AUDIO_ACCUM_SAMPLES * 4U;
+        uint32_t consumed = 0U;
+        while (consumed < total) {
+            int16_t *dst = ds_pcm_ring[ds_pcm_wr_idx];
+            uint32_t pos = ds_pcm_wr_pos;
+            const uint32_t space = cap - pos;
+            uint32_t chunk = total - consumed;
+            if (chunk > space) chunk = space;
+            memcpy(&dst[pos], &src[consumed], chunk * sizeof(int16_t));
+            pos += chunk;
+            consumed += chunk;
+            if (pos >= cap) {
+                ds_pcm_wr_pos = 0U;
+                ds_pcm_wr_idx ^= 1U;
+                ds_pcm_ready = true;
+                if (ds_audio_task_handle != NULL) {
+                    BaseType_t woken = pdFALSE;
+                    vTaskNotifyGiveFromISR(ds_audio_task_handle, &woken);
+                    portYIELD_FROM_ISR(woken);
                 }
             } else {
-                ++errors;
+                ds_pcm_wr_pos = pos;
             }
         }
     } else {
@@ -259,7 +282,9 @@ void usbd_audio_open(uint8_t id, uint8_t intf)
     if (id != bus) return;
     const bool split = dongle_usb_profile_dualsense_split_audio();
     if (split && intf == 1U) {
-        (void)dongle_ds_haptics_reset(&ds_haptics);
+        ds_pcm_wr_pos = 0U;
+        ds_pcm_wr_idx = 0U;
+        ds_pcm_ready = false;
         ds_opened = true;
         if (usbd_ep_start_read(bus, 0x02U, ds_haptics_packet, 392U)) ++errors;
     } else if ((split && intf == 6U) || (!split && intf == 1U)) {
@@ -291,9 +316,8 @@ void usbd_audio_close(uint8_t id, uint8_t intf)
     const bool split = dongle_usb_profile_dualsense_split_audio();
     if (split && intf == 1U) {
         ds_opened = false;
-        if (dongle_ds_haptics_reset(&ds_haptics)) {
-            dongle_bluetooth_send_dualsense_audio_haptics(0U, 0U, 0U);
-        }
+        ds_pcm_wr_pos = 0U;
+        ds_pcm_ready = false;
     } else if ((split && intf == 6U) || (!split && intf == 1U)) {
         opened = false;
         if (!split && dongle_ds_haptics_reset(&ds_haptics)) {
@@ -338,8 +362,12 @@ uint32_t usbd_audio_get_sampling_freq(uint8_t id, uint8_t ep)
 void usbd_audio_set_mute(uint8_t id, uint8_t ep, uint8_t ch, bool mute)
 {
     (void)id; (void)ch;
-    if (ep == 0x02U) { ds_playback_muted = mute; }
-    else if (ep == 0x84U) { mic_muted = mute; }
+    if (ep == 0x02U) {
+        ds_playback_muted = mute;
+        dongle_bluetooth_set_dualsense_audio_mute(0U, mute);
+    } else if (ep == 0x84U) {
+        mic_muted = mute;
+    }
 }
 bool usbd_audio_get_mute(uint8_t id, uint8_t ep, uint8_t ch)
 {
@@ -352,8 +380,13 @@ void usbd_audio_set_volume(uint8_t id, uint8_t ep, uint8_t ch, int volume_db)
     (void)id; (void)ch;
     if (volume_db < -100) volume_db = -100;
     if (volume_db > 0) volume_db = 0;
-    if (ep == 0x02U) { ds_playback_volume_db = volume_db; }
-    else if (ep == 0x84U) { mic_volume_db = volume_db; }
+    if (ep == 0x02U) {
+        ds_playback_volume_db = volume_db;
+        const uint8_t vol = (uint8_t)(((volume_db + 100) * 127 + 50) / 100);
+        dongle_bluetooth_set_dualsense_audio_volume(0U, vol, vol);
+    } else if (ep == 0x84U) {
+        mic_volume_db = volume_db;
+    }
 }
 int usbd_audio_get_volume(uint8_t id, uint8_t ep, uint8_t ch)
 {
@@ -367,6 +400,8 @@ void dongle_usb_audio_event(uint8_t event)
     else if (event == USBD_EVENT_RESET || event == USBD_EVENT_DISCONNECTED ||
              event == USBD_EVENT_SUSPEND || event == USBD_EVENT_DEINIT) {
         configured = opened = ds_opened = mic_opened = mic_busy = false;
+        ds_pcm_wr_pos = 0U;
+        ds_pcm_ready = false;
         if (dongle_ds_haptics_reset(&ds_haptics)) {
             dongle_bluetooth_send_dualsense_audio_haptics(0U, 0U, 0U);
         }
@@ -492,9 +527,18 @@ static void audio_task(void *unused)
             const int enc_rc = dongle_a2dp_encoder_encode(src_pcm, bt_frames, media_pdu,
                                                           sizeof(media_pdu), &pdu_len);
             if (enc_rc == 0) {
-                const int snd_rc = (pdu_len > 0U)
-                    ? dongle_bluetooth_send_a2dp_media(media_pdu, pdu_len)
-                    : 0;
+                int snd_rc = 0;
+                if (pdu_len > 0U) {
+                    for (unsigned attempt = 0U; attempt < 15U; ++attempt) {
+                        snd_rc = dongle_bluetooth_send_a2dp_media(media_pdu, pdu_len);
+                        if (snd_rc >= 0 ||
+                            (snd_rc != -ENOMEM && snd_rc != -EAGAIN && snd_rc != -ENOBUFS) ||
+                            !playing || !opened) {
+                            break;
+                        }
+                        vTaskDelay(pdMS_TO_TICKS(1));
+                    }
+                }
                 if (pdu_len > 0U && snd_rc < 0) {
                     ++errors;
                     if (now - last_congestion_us >= 500000ULL) {
@@ -557,6 +601,115 @@ void dongle_usb_audio_attach_headphone(uint8_t id)
     usbd_add_interface(bus, usbd_audio_init_intf(bus, &hp_control, 0x100, audio_entities, n_ent));
     usbd_add_interface(bus, usbd_audio_init_intf(bus, &hp_stream, 0x100, audio_entities, n_ent));
 }
+static DONGLE_TCM_CODE void ds_audio_task(void *unused)
+{
+    (void)unused;
+    static int16_t block[DONGLE_DS_AUDIO_ACCUM_SAMPLES * 4U];
+    static int16_t spk_resamp[DONGLE_DS_AUDIO_OPUS_SAMPLES * 2U];
+    static int8_t haptic_slots[2][DONGLE_DS_AUDIO_HAPTIC_BYTES];
+    static uint8_t opus_slots[2][DONGLE_DS_AUDIO_OPUS_BYTES];
+    static uint8_t pkt_39[DONGLE_DS_AUDIO_BT_REPORT_SIZE];
+    uint8_t seq = 0U;
+    uint8_t pkt_ctr = 0U;
+
+    for (;;) {
+        bool should_suspend = false;
+        taskENTER_CRITICAL();
+        if (ds_audio_ota_suspend_req) {
+            ds_audio_ota_suspended = true;
+            should_suspend = true;
+        } else {
+            ds_audio_ota_suspended = false;
+        }
+        taskEXIT_CRITICAL();
+        if (should_suspend) {
+            vTaskSuspend(NULL);
+            continue;
+        }
+
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(25U));
+        if (!ds_opened || !ds_pcm_ready ||
+            (dongle_bluetooth_connected() & 0x01U) == 0U) {
+            continue;
+        }
+
+        taskENTER_CRITICAL();
+        const bool ready = ds_pcm_ready;
+        const uint8_t rd_idx = ds_pcm_wr_idx ^ 1U;
+        if (ready) {
+            memcpy(block, ds_pcm_ring[rd_idx], sizeof(block));
+            ds_pcm_ready = false;
+        }
+        taskEXIT_CRITICAL();
+        if (!ready) {
+            continue;
+        }
+
+        if (ds_opus_enc == NULL) {
+            const int enc_size = opus_encoder_get_size(2);
+            if (enc_size > 0 && (size_t)enc_size <= sizeof(ds_opus_enc_mem)) {
+                OpusEncoder *enc = (OpusEncoder *)ds_opus_enc_mem;
+                if (opus_encoder_init(enc, 48000, 2,
+                                      OPUS_APPLICATION_RESTRICTED_LOWDELAY) == OPUS_OK) {
+                    (void)opus_encoder_ctl(
+                        enc, OPUS_SET_EXPERT_FRAME_DURATION(OPUS_FRAMESIZE_10_MS));
+                    (void)opus_encoder_ctl(enc, OPUS_SET_BITRATE(200 * 8 * 100));
+                    (void)opus_encoder_ctl(enc, OPUS_SET_VBR(0));
+                    (void)opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(0));
+                    (void)opus_encoder_ctl(enc, OPUS_SET_FORCE_CHANNELS(1));
+                    ds_opus_force_channels = 1;
+                    ds_opus_enc = enc;
+                }
+            }
+        }
+
+        const bool headset = dongle_bluetooth_dualsense_headset_plugged(0U);
+        const int target_channels = headset ? 2 : 1;
+        if (ds_opus_enc != NULL && target_channels != ds_opus_force_channels) {
+            if (opus_encoder_ctl(ds_opus_enc,
+                                 OPUS_SET_FORCE_CHANNELS(target_channels)) == OPUS_OK) {
+                ds_opus_force_channels = target_channels;
+            }
+        }
+
+        const bool muted = ds_playback_muted;
+        const uint16_t gain_pct = dongle_usb_audio_get_rumble_gain();
+        for (uint32_t slot = 0U; slot < 2U; ++slot) {
+            const int16_t *slot_pcm =
+                &block[slot * DONGLE_DS_AUDIO_HALF_SAMPLES * 4U];
+            if (muted) {
+                memset(haptic_slots[slot], 0, sizeof(haptic_slots[slot]));
+                memset(opus_slots[slot], 0, sizeof(opus_slots[slot]));
+            } else {
+                dongle_ds_audio_decimate_haptics(
+                    slot_pcm, gain_pct, haptic_slots[slot]);
+                if (ds_opus_enc != NULL) {
+                    dongle_ds_audio_resample_512_480(slot_pcm, spk_resamp);
+                    const int encoded = opus_encode(
+                        ds_opus_enc, spk_resamp, DONGLE_DS_AUDIO_OPUS_SAMPLES,
+                        opus_slots[slot], DONGLE_DS_AUDIO_OPUS_BYTES);
+                    if (encoded <= 0) {
+                        memset(opus_slots[slot], 0, DONGLE_DS_AUDIO_OPUS_BYTES);
+                    } else if ((size_t)encoded < DONGLE_DS_AUDIO_OPUS_BYTES) {
+                        memset(opus_slots[slot] + encoded, 0,
+                               DONGLE_DS_AUDIO_OPUS_BYTES - (size_t)encoded);
+                    }
+                } else {
+                    memset(opus_slots[slot], 0, DONGLE_DS_AUDIO_OPUS_BYTES);
+                }
+            }
+        }
+
+        pkt_ctr = (uint8_t)(pkt_ctr + 2U);
+        dongle_ds_audio_build_report_39(
+            seq, pkt_ctr, dongle_bluetooth_dualsense_mic_active(0U), headset,
+            !muted, haptic_slots[0], haptic_slots[1],
+            opus_slots[0], opus_slots[1], pkt_39);
+        seq = (uint8_t)((seq + 1U) & 0x0FU);
+        (void)dongle_bluetooth_send_dualsense_audio_report(0U, pkt_39);
+    }
+}
+
 int dongle_usb_audio_register(uint8_t id)
 {
     const dongle_audio_format_t format = {.sample_rate_hz=44100, .channels=2, .bits_per_sample=16};
@@ -565,6 +718,15 @@ int dongle_usb_audio_register(uint8_t id)
     if (dongle_audio_stream_init(&pcm, storage, sizeof(storage), &format) != DONGLE_AUDIO_STREAM_OK) return -1;
     if (dongle_audio_stream_init(&mic_pcm, mic_storage, sizeof(mic_storage), &mic_format) != DONGLE_AUDIO_STREAM_OK) return -1;
     dongle_usb_audio_attach(id);
+    if (ds_audio_task_handle == NULL) {
+        ds_audio_task_handle = xTaskCreateStatic(
+            ds_audio_task, "ds_audio",
+            (uint32_t)(sizeof(ds_audio_stack) / sizeof(ds_audio_stack[0])),
+            NULL, 6, ds_audio_stack, &ds_audio_tcb);
+        if (ds_audio_task_handle == NULL) {
+            return -1;
+        }
+    }
     if (audio_task_handle != NULL) return 0;
     return xTaskCreate(audio_task, "usb_audio", 3072, NULL, 5, &audio_task_handle) == pdPASS ? 0 : -1;
 }
@@ -573,12 +735,15 @@ void dongle_usb_audio_set_ota_suspended(bool suspended)
     if (suspended) {
         taskENTER_CRITICAL();
         audio_ota_suspend_req = true;
+        ds_audio_ota_suspend_req = true;
         taskEXIT_CRITICAL();
         return;
     }
     taskENTER_CRITICAL();
     audio_ota_suspend_req = false;
+    ds_audio_ota_suspend_req = false;
     const bool was_parking = audio_ota_suspended;
+    const bool ds_was_parking = ds_audio_ota_suspended;
     taskEXIT_CRITICAL();
     if (audio_task_handle != NULL) {
         if (eTaskGetState(audio_task_handle) == eSuspended) {
@@ -593,9 +758,24 @@ void dongle_usb_audio_set_ota_suspended(bool suspended)
             }
         }
     }
+    if (ds_audio_task_handle != NULL) {
+        if (eTaskGetState(ds_audio_task_handle) == eSuspended) {
+            vTaskResume(ds_audio_task_handle);
+        } else if (ds_was_parking) {
+            for (unsigned i = 0U; i < 10U && ds_audio_ota_suspended; ++i) {
+                if (eTaskGetState(ds_audio_task_handle) == eSuspended) {
+                    vTaskResume(ds_audio_task_handle);
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(1U));
+            }
+        }
+    }
 }
 bool dongle_usb_audio_ota_is_suspended(void)
 {
-    return audio_task_handle == NULL ||
-           eTaskGetState(audio_task_handle) == eSuspended;
+    return (audio_task_handle == NULL ||
+            eTaskGetState(audio_task_handle) == eSuspended) &&
+           (ds_audio_task_handle == NULL ||
+            eTaskGetState(ds_audio_task_handle) == eSuspended);
 }

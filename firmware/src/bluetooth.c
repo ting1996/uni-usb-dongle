@@ -60,14 +60,17 @@ typedef struct {
     TickType_t role_deadline;
     TickType_t retry_at;
     TickType_t audio_poll_at;
+    TickType_t conn_at, auth_at;
+    bool l2cap_fallback_tried;
     uint32_t rtp_samples, rtp_packets;
     uint8_t ds_feat_05[41];
     uint8_t ds_feat_08[48];
     uint8_t ds_feat_09[20];
     uint8_t ds_feat_20[64];
+    uint8_t ds_feat_22[64];
     uint8_t ds_feat_81[64];
     bool ds_feat_05_valid, ds_feat_08_valid, ds_feat_09_valid;
-    bool ds_feat_20_valid, ds_feat_81_valid, ds_led_unlocked, ds_80_await_handshake;
+    bool ds_feat_20_valid, ds_feat_22_valid, ds_feat_81_valid, ds_led_unlocked, ds_80_await_handshake;
     uint8_t ds_probe_stage, ds_probe_retries, ds_pending_get_id, ds_80_repoll_left, ds_feat_logged;
     TickType_t ds_probe_at, ds_80_poll_at;
 } peer_t;
@@ -82,6 +85,8 @@ static uint32_t ds_out_gen[2];
 static TickType_t ds_out_retry_at[2];
 static bool ds_mic_enabled[2];
 static bool ds_mic_unmuted[2];
+static volatile bool ds_headset_plugged[2];
+static uint8_t ds_prev_mute_bit[2] = { 0xFFU, 0xFFU };
 /* Last USB output report forwarded over Bluetooth, for coalescing. Hosts can
  * resend identical rumble/LED output every USB frame; each forwarded report
  * costs controller airtime and ACL buffers shared with the A2DP link. */
@@ -97,6 +102,9 @@ static bool ds_out_stop_pending[2];
 static TickType_t ds_out_stop_at[2];
 static TickType_t ds_hid_rumble_until[2];
 static volatile uint16_t ds_rumble_gain_pct = 100U;
+static uint8_t ds_cached_trig_flags[2];
+static uint8_t ds_cached_trig_r[2][11];
+static uint8_t ds_cached_trig_l[2][11];
 static uint8_t ds_feat_tx_buf[2][64];
 static uint8_t ds_feat_tx_len[2];
 static volatile bool ds_feat_tx_pending[2];
@@ -165,6 +173,7 @@ static uint8_t headphone[6]; /* host display order, most significant byte first 
 static volatile uint8_t audio_state, audio_error_stage, audio_error;
 static uint8_t audio_target[6];
 static volatile bool restore_page_scan;
+static volatile bool page_scan_activity_dirty;
 /* Explicitly armed diagnostic capture, read back over management HID. */
 static uint8_t media_capture[1024];
 static volatile uint16_t media_capture_size;
@@ -565,6 +574,7 @@ static int receive_control(struct bt_l2cap_chan *chan, struct net_buf *buf)
             else if (id == 0x20U) bit = 0x04U;
             else if (id == 0x08U) bit = 0x08U;
             else if (id == 0x81U) bit = 0x10U;
+            else if (id == 0x22U) bit = 0x20U;
         }
         if (p->slot < 2U && (!crc_ok || (bit != 0U && !(p->ds_feat_logged & bit)))) {
             if (bit != 0U) {
@@ -587,6 +597,9 @@ static int receive_control(struct bt_l2cap_chan *chan, struct net_buf *buf)
             } else if (id == 0x20U && usb_len == sizeof(p->ds_feat_20)) {
                 memcpy(p->ds_feat_20, usb_feat, sizeof(p->ds_feat_20));
                 p->ds_feat_20_valid = true;
+            } else if (id == 0x22U && usb_len == sizeof(p->ds_feat_22)) {
+                memcpy(p->ds_feat_22, usb_feat, sizeof(p->ds_feat_22));
+                p->ds_feat_22_valid = true;
             } else if (id == 0x81U && usb_len == sizeof(p->ds_feat_81)) {
                 memcpy(p->ds_feat_81, usb_feat, sizeof(p->ds_feat_81));
                 if (usb_feat[3] == 0x01U && p->ds_80_repoll_left > 0U) {
@@ -651,6 +664,20 @@ static int receive_input(struct bt_l2cap_chan *chan, struct net_buf *buf)
                 has_raw = dongle_dualsense_bt_to_usb_input(buf->data + 1, buf->len - 1, ds_usb);
             }
             if (has_raw) {
+                if (p->slot < 2U) {
+                    ds_headset_plugged[p->slot] = (ds_usb[54] & 0x01U) != 0U;
+                    const uint8_t cur_mute = (uint8_t)((ds_usb[54] >> 2U) & 0x01U);
+                    if (ds_prev_mute_bit[p->slot] != 0xFFU &&
+                        cur_mute != ds_prev_mute_bit[p->slot]) {
+                        uint8_t mute_usb[DONGLE_DUALSENSE_USB_OUTPUT_SIZE] = { 0 };
+                        mute_usb[0] = 0x02U;
+                        mute_usb[2] = 0x01U; /* AllowMuteLight */
+                        mute_usb[9] = cur_mute ? 0x01U : 0x00U;
+                        dongle_bluetooth_send_dualsense_output_ex(
+                            p->slot, mute_usb, sizeof(mute_usb), 0x20U);
+                    }
+                    ds_prev_mute_bit[p->slot] = cur_mute;
+                }
                 dongle_usb_gamepad_submit_dualsense(p->slot, report, sizeof(report), ds_usb);
             } else {
                 dongle_usb_gamepad_sink(NULL, p->slot, report, sizeof(report));
@@ -726,6 +753,74 @@ static int accept_input(struct bt_conn *conn, struct bt_l2cap_chan **channel)
 }
 static struct bt_l2cap_server control_server = {.psm = 0x11, .accept = accept_control};
 static struct bt_l2cap_server input_server = {.psm = 0x13, .accept = accept_input};
+static struct bt_sdp_attribute hid_host_attrs[] = {
+    BT_SDP_NEW_SERVICE,
+    BT_SDP_LIST(
+        BT_SDP_ATTR_SVCLASS_ID_LIST,
+        BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 3),
+        BT_SDP_DATA_ELEM_LIST(
+            { BT_SDP_TYPE_SIZE(BT_SDP_UUID16), BT_SDP_ARRAY_16(0x1124) },
+        )
+    ),
+    BT_SDP_LIST(
+        BT_SDP_ATTR_PROTO_DESC_LIST,
+        BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 13),
+        BT_SDP_DATA_ELEM_LIST(
+            {
+                BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 6),
+                BT_SDP_DATA_ELEM_LIST(
+                    { BT_SDP_TYPE_SIZE(BT_SDP_UUID16), BT_SDP_ARRAY_16(0x0100) },
+                    { BT_SDP_TYPE_SIZE(BT_SDP_UINT16), BT_SDP_ARRAY_16(0x0011) },
+                )
+            },
+            {
+                BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 3),
+                BT_SDP_DATA_ELEM_LIST(
+                    { BT_SDP_TYPE_SIZE(BT_SDP_UUID16), BT_SDP_ARRAY_16(0x0011) },
+                )
+            },
+        )
+    ),
+    BT_SDP_LIST(
+        BT_SDP_ATTR_ADD_PROTO_DESC_LIST,
+        BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 15),
+        BT_SDP_DATA_ELEM_LIST(
+            {
+                BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 13),
+                BT_SDP_DATA_ELEM_LIST(
+                    {
+                        BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 6),
+                        BT_SDP_DATA_ELEM_LIST(
+                            { BT_SDP_TYPE_SIZE(BT_SDP_UUID16), BT_SDP_ARRAY_16(0x0100) },
+                            { BT_SDP_TYPE_SIZE(BT_SDP_UINT16), BT_SDP_ARRAY_16(0x0013) },
+                        )
+                    },
+                    {
+                        BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 3),
+                        BT_SDP_DATA_ELEM_LIST(
+                            { BT_SDP_TYPE_SIZE(BT_SDP_UUID16), BT_SDP_ARRAY_16(0x0011) },
+                        )
+                    },
+                )
+            },
+        )
+    ),
+    BT_SDP_LIST(
+        BT_SDP_ATTR_PROFILE_DESC_LIST,
+        BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 8),
+        BT_SDP_DATA_ELEM_LIST(
+            {
+                BT_SDP_TYPE_SIZE_VAR(BT_SDP_SEQ8, 6),
+                BT_SDP_DATA_ELEM_LIST(
+                    { BT_SDP_TYPE_SIZE(BT_SDP_UUID16), BT_SDP_ARRAY_16(0x1124) },
+                    { BT_SDP_TYPE_SIZE(BT_SDP_UINT16), BT_SDP_ARRAY_16(0x0111) },
+                )
+            },
+        )
+    ),
+    BT_SDP_SERVICE_NAME("HID Host"),
+};
+static struct bt_sdp_record hid_host_record = BT_SDP_RECORD(hid_host_attrs);
 
 static void connected(struct bt_conn *conn, uint8_t err)
 {
@@ -751,12 +846,15 @@ static void connected(struct bt_conn *conn, uint8_t err)
     if (!p->conn) p->conn = bt_conn_ref(conn);
     p->rtp_packets = p->rtp_samples = 0;
     p->outgoing = outgoing;
+    p->conn_at = xTaskGetTickCount();
+    p->auth_at = 0;
+    p->l2cap_fallback_tried = false;
     last_error = 0;
     p->security_pending = true;
     /* Request the central role before authentication so it cannot collide
      * with the security LMP transaction; see manage_role(). */
     p->role_stage = 1; p->role_deadline = xTaskGetTickCount();
-    if (p->role) { audio_state = 2; audio_error = audio_error_stage = 0; }
+    if (p->role) { page_scan_activity_dirty = true; audio_state = 2; audio_error = audio_error_stage = 0; }
     printf("[RADIO] ACL connected role=%u link=%s\r\n", p->role,
            conn->role == BT_HCI_ROLE_MASTER ? "central" : "peripheral");
 }
@@ -780,6 +878,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
         ds_hid_rumble_until[p->slot] = 0;
         ds_mic_enabled[p->slot] = false;
         ds_mic_unmuted[p->slot] = false;
+        ds_headset_plugged[p->slot] = false;
+        ds_prev_mute_bit[p->slot] = 0xFFU;
         ds_mic_retry_at[p->slot] = 0;
         ds_feat_tx_pending[p->slot] = false;
         ds_feat_get_req[p->slot] = 0U;
@@ -787,11 +887,13 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
         ds_unlock(locked);
     }
     p->ds_feat_05_valid = p->ds_feat_08_valid = p->ds_feat_09_valid = false;
-    p->ds_feat_20_valid = p->ds_feat_81_valid = false;
+    p->ds_feat_20_valid = p->ds_feat_22_valid = p->ds_feat_81_valid = false;
     p->ds_led_unlocked = p->ds_80_await_handshake = false;
     p->ds_probe_stage = p->ds_probe_retries = p->ds_pending_get_id = 0U;
     p->ds_80_repoll_left = p->ds_feat_logged = 0U;
+    p->conn_at = 0; p->auth_at = 0; p->l2cap_fallback_tried = false;
     if (p->role) {
+        page_scan_activity_dirty = true;
         release_sco_active_conn();
         sco_connected = false;
         sco_opening = false;
@@ -826,8 +928,17 @@ static void security_changed(struct bt_conn *conn, bt_security_t level, enum bt_
 {
     peer_t *p = find_peer(conn);
     if (!p) return;
-    if (err || level < BT_SECURITY_L2) { last_error = err ? err : 1; if (p->role) audio_failure(2, last_error); return; }
+    if (err || level < BT_SECURITY_L2) {
+        last_error = err ? err : 1;
+        if (err == BT_SECURITY_ERR_AUTH_FAIL || err == BT_SECURITY_ERR_PIN_OR_KEY_MISSING) {
+            bt_keys_link_key_clear_addr(&p->address);
+            bt_conn_disconnect(conn, BT_HCI_ERR_AUTH_FAIL);
+        }
+        if (p->role) audio_failure(2, last_error);
+        return;
+    }
     p->authenticated = true; p->profile_pending = true;
+    p->auth_at = xTaskGetTickCount();
     if (p->role) {
         audio_state = 3;
         hfp_acl_conn = conn;
@@ -1309,6 +1420,22 @@ static int disable_default_link_policy(void)
     cp->link_policy = sys_cpu_to_le16(0);
     return bt_hci_cmd_send_sync(BT_HCI_OP_WRITE_DEFAULT_LINK_POLICY, buf, NULL);
 }
+#define DONGLE_HCI_OP_WRITE_PAGE_SCAN_ACTIVITY BT_OP(BT_OGF_BASEBAND, 0x001c)
+struct dongle_hci_cp_write_page_scan_activity {
+    uint16_t interval;
+    uint16_t window;
+} __packed;
+static int configure_page_scan_activity(bool aggressive)
+{
+    struct net_buf *buf = bt_hci_cmd_create(
+        DONGLE_HCI_OP_WRITE_PAGE_SCAN_ACTIVITY,
+        sizeof(struct dongle_hci_cp_write_page_scan_activity));
+    if (!buf) return -ENOBUFS;
+    struct dongle_hci_cp_write_page_scan_activity *cp = net_buf_add(buf, sizeof(*cp));
+    cp->interval = sys_cpu_to_le16(aggressive ? 0x0012U : 0x0800U);
+    cp->window = sys_cpu_to_le16(0x0012U);
+    return bt_hci_cmd_send_sync(DONGLE_HCI_OP_WRITE_PAGE_SCAN_ACTIVITY, buf, NULL);
+}
 static int keep_central(struct bt_conn *connection)
 {
     struct net_buf *buf = bt_hci_cmd_create(BT_HCI_OP_WRITE_LINK_POLICY,
@@ -1471,6 +1598,17 @@ static void radio_task(void *unused)
             bool paging = false;
             for (unsigned i = 0; i < PEERS; ++i) paging |= peers[i].connecting;
             if (!paging) { restore_page_scan = false; bt_br_set_connectable(true); }
+        }
+        if (page_scan_activity_dirty) {
+            page_scan_activity_dirty = false;
+            bool hp_active = false;
+            for (unsigned i = 0; i < PEERS; ++i) {
+                if (peers[i].role && peers[i].conn != NULL) {
+                    hp_active = true;
+                    break;
+                }
+            }
+            (void)configure_page_scan_activity(!hp_active);
         }
         bool ctrl_active = false;
         for (unsigned i = 0; i < PEERS; ++i) {
@@ -1698,6 +1836,24 @@ static void radio_task(void *unused)
                 }
             }
             manage_role(p, connection);
+            if (!p->authenticated && p->conn_at != 0 &&
+                (TickType_t)(xTaskGetTickCount() - p->conn_at) >= pdMS_TO_TICKS(8000U)) {
+                if (bt_conn_get_security(connection) >= BT_SECURITY_L2) {
+                    security_changed(connection, bt_conn_get_security(connection), 0);
+                } else {
+                    p->conn_at = 0;
+                    bt_keys_link_key_clear_addr(&p->address);
+                    printf("[RADIO] security timeout role=%u; clearing key\r\n", p->role);
+                    bt_conn_disconnect(connection, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+                }
+            }
+            if (!p->role && p->authenticated && !p->outgoing && !p->l2cap_fallback_tried &&
+                p->auth_at != 0 && (!p->control_open || !p->interrupt_open) &&
+                (TickType_t)(xTaskGetTickCount() - p->auth_at) >= pdMS_TO_TICKS(3000U)) {
+                p->l2cap_fallback_tried = true;
+                p->outgoing = true;
+                p->profile_pending = true;
+            }
             if (p->security_pending && p->role_stage != 1 && p->role_stage != 2) {
                 p->security_pending = false;
                 /* This SDK can retain required_sec_level across reconnects. */
@@ -1714,12 +1870,13 @@ static void radio_task(void *unused)
                 p->control_open && p->interrupt_open && p->opening) {
                 const TickType_t now = xTaskGetTickCount();
                 if ((int32_t)(now - p->ds_probe_at) >= 0) {
-                    if (p->ds_probe_stage == 1U || p->ds_probe_stage == 2U) {
-                        const uint8_t probe_id = p->ds_probe_stage == 1U ? 0x20U : 0x09U;
+                    if (p->ds_probe_stage == 1U || p->ds_probe_stage == 2U || p->ds_probe_stage == 3U) {
+                        const uint8_t probe_id = p->ds_probe_stage == 1U ? 0x20U
+                            : (p->ds_probe_stage == 2U ? 0x09U : 0x22U);
                         (void)ds_send_l2cap_report(&p->control.chan, 0x43U, &probe_id, 1U);
                         ++p->ds_probe_stage;
                         p->ds_probe_at = now + pdMS_TO_TICKS(100);
-                    } else if (p->ds_probe_stage == 3U) {
+                    } else if (p->ds_probe_stage == 4U) {
                         uint8_t seq = 0U;
                         if (p->slot < 2U) {
                             const bool locked = ds_lock();
@@ -1727,23 +1884,41 @@ static void radio_task(void *unused)
                             ds_unlock(locked);
                         }
                         uint8_t bt_rep[DONGLE_DUALSENSE_BT_OUTPUT_SIZE];
-                        dongle_dualsense_bt_unlock_leds(seq, bt_rep);
+                        if (p->slot < 2U && ds_cached_trig_flags[p->slot] != 0U) {
+                            uint8_t usb[48] = { 0x02U };
+                            usb[1] = ds_cached_trig_flags[p->slot];
+                            usb[2] = 0x40U;
+                            usb[37] = 0x00U;
+                            usb[39] = 0x03U;
+                            usb[42] = 0x02U;
+                            if ((ds_cached_trig_flags[p->slot] & 0x04U) != 0U) {
+                                memcpy(&usb[11], ds_cached_trig_r[p->slot], 11U);
+                            }
+                            if ((ds_cached_trig_flags[p->slot] & 0x08U) != 0U) {
+                                memcpy(&usb[22], ds_cached_trig_l[p->slot], 11U);
+                            }
+                            (void)dongle_dualsense_usb_to_bt_output(usb, sizeof(usb), seq, bt_rep);
+                        } else {
+                            dongle_dualsense_bt_unlock_leds(seq, bt_rep);
+                        }
                         if (ds_send_l2cap_report(&p->interrupt.chan, 0xa2U,
                                                  bt_rep, sizeof(bt_rep)) >= 0) {
                             p->ds_led_unlocked = true;
                         }
-                        p->ds_probe_stage = 4U;
+                        p->ds_probe_stage = 5U;
                         p->ds_probe_at = now + pdMS_TO_TICKS(200);
-                    } else if (p->ds_probe_stage == 4U) {
+                    } else if (p->ds_probe_stage == 5U) {
                         if ((!p->ds_feat_05_valid || !p->ds_feat_20_valid ||
-                             !p->ds_feat_09_valid) && p->ds_probe_retries < 3U) {
+                             !p->ds_feat_09_valid || !p->ds_feat_22_valid) &&
+                            p->ds_probe_retries < 3U) {
                             const uint8_t retry_id = !p->ds_feat_05_valid ? 0x05U
-                                : (!p->ds_feat_20_valid ? 0x20U : 0x09U);
+                                : (!p->ds_feat_20_valid ? 0x20U
+                                : (!p->ds_feat_09_valid ? 0x09U : 0x22U));
                             ++p->ds_probe_retries;
                             (void)ds_send_l2cap_report(&p->control.chan, 0x43U, &retry_id, 1U);
                             p->ds_probe_at = now + pdMS_TO_TICKS(400);
                         } else {
-                            p->ds_probe_stage = 5U;
+                            p->ds_probe_stage = 6U;
                         }
                     }
                 }
@@ -1928,6 +2103,7 @@ static void radio_task(void *unused)
                             locked = ds_lock();
                             if (tx_err >= 0) {
                                 memcpy(ds_out_last[p->slot], usb_copy, usb_len);
+                                ds_out_last[p->slot][2] &= (uint8_t)~0x08U; /* clear one-shot ResetLights */
                                 ds_out_last_len[p->slot] = usb_len;
                                 ds_out_last_at[p->slot] = now;
                                 ++ds_out_seq[p->slot];
@@ -2221,6 +2397,9 @@ size_t dongle_bluetooth_dualsense_feature(
         } else if (report_id == 0x20U && p->ds_feat_20_valid && capacity >= sizeof(p->ds_feat_20)) {
             memcpy(out, p->ds_feat_20, sizeof(p->ds_feat_20));
             copied = sizeof(p->ds_feat_20);
+        } else if (report_id == 0x22U && p->ds_feat_22_valid && capacity >= sizeof(p->ds_feat_22)) {
+            memcpy(out, p->ds_feat_22, sizeof(p->ds_feat_22));
+            copied = sizeof(p->ds_feat_22);
         } else if (report_id == 0x81U && p->ds_feat_81_valid && capacity >= sizeof(p->ds_feat_81)) {
             memcpy(out, p->ds_feat_81, sizeof(p->ds_feat_81));
             copied = sizeof(p->ds_feat_81);
@@ -2280,6 +2459,14 @@ void dongle_bluetooth_send_dualsense_output_ex(
         ds_out_pending[slot] = true;
         ds_out_stop_pending[slot] = false;
     }
+    if ((usb_report[1] & 0x04U) != 0U) {
+        ds_cached_trig_flags[slot] |= 0x04U;
+        memcpy(ds_cached_trig_r[slot], &usb_report[11], 11U);
+    }
+    if ((usb_report[1] & 0x08U) != 0U) {
+        ds_cached_trig_flags[slot] |= 0x08U;
+        memcpy(ds_cached_trig_l[slot], &usb_report[22], 11U);
+    }
     if (usb_report[3] != 0U || usb_report[4] != 0U) {
         ds_out_stop_at[slot] = 0;
         if ((path_flags & 0x10U) == 0U) {
@@ -2312,6 +2499,66 @@ void dongle_bluetooth_send_dualsense_audio_haptics(
     ds_out[4] = motor_left;
     ds_out[39] = 0x04U; /* COMPATIBLE_VIBRATION2 */
     dongle_bluetooth_send_dualsense_output_ex(slot, ds_out, sizeof(ds_out), 0x10U);
+}
+int dongle_bluetooth_send_dualsense_audio_report(
+    uint8_t slot, const uint8_t report[547])
+{
+    if (slot >= 2U || !report) {
+        return -EINVAL;
+    }
+    struct bt_l2cap_chan *ch = NULL;
+    taskENTER_CRITICAL();
+    for (unsigned i = 0U; i < PEERS; ++i) {
+        if (!peers[i].role && peers[i].slot == slot && peers[i].conn != NULL &&
+            peers[i].authenticated && peers[i].interrupt_open &&
+            peers[i].interrupt.chan.conn != NULL) {
+            ch = &peers[i].interrupt.chan;
+            break;
+        }
+    }
+    taskEXIT_CRITICAL();
+    if (!ch) {
+        return -ENOTCONN;
+    }
+    return ds_send_l2cap_report(ch, 0xA2U, report, 547U);
+}
+bool dongle_bluetooth_dualsense_headset_plugged(uint8_t slot)
+{
+    return slot < 2U ? ds_headset_plugged[slot] : false;
+}
+bool dongle_bluetooth_dualsense_mic_active(uint8_t slot)
+{
+    if (slot >= 2U) {
+        return false;
+    }
+    const bool locked = ds_lock();
+    const bool active = ds_mic_enabled[slot];
+    ds_unlock(locked);
+    return active;
+}
+void dongle_bluetooth_set_dualsense_audio_volume(
+    uint8_t slot, uint8_t spk_vol, uint8_t hp_vol)
+{
+    if (slot >= 2U) {
+        return;
+    }
+    uint8_t ds_out[DONGLE_DUALSENSE_USB_OUTPUT_SIZE] = { 0 };
+    ds_out[0] = 0x02U;
+    ds_out[1] = 0x30U; /* AllowHeadphoneVolume | AllowSpeakerVolume */
+    ds_out[5] = hp_vol;
+    ds_out[6] = spk_vol;
+    dongle_bluetooth_send_dualsense_output_ex(slot, ds_out, sizeof(ds_out), 0x20U);
+}
+void dongle_bluetooth_set_dualsense_audio_mute(uint8_t slot, bool mute)
+{
+    if (slot >= 2U) {
+        return;
+    }
+    uint8_t ds_out[DONGLE_DUALSENSE_USB_OUTPUT_SIZE] = { 0 };
+    ds_out[0] = 0x02U;
+    ds_out[2] = 0x02U; /* AllowAudioMute */
+    ds_out[10] = mute ? 0x60U : 0x00U;
+    dongle_bluetooth_send_dualsense_output_ex(slot, ds_out, sizeof(ds_out), 0x20U);
 }
 void dongle_bluetooth_set_rumble_gain(uint16_t gain_pct)
 {
@@ -2541,9 +2788,11 @@ int dongle_bluetooth_start(dongle_device_catalog_t *devices, dongle_settings_sto
 #endif
     (void)bt_sdp_register_service(&a2dp_src_record);
     (void)bt_l2cap_br_server_register(&avdtp_server);
+    (void)bt_sdp_register_service(&hid_host_record);
     bt_l2cap_br_server_register(&control_server); bt_l2cap_br_server_register(&input_server);
     (void)bt_sdp_register_service(&hfp_ag_record);
     (void)bt_rfcomm_server_register(&hfp_server);
+    (void)configure_page_scan_activity(true);
     bt_br_set_connectable(true);
     GLB_Set_USB_CLK_From_WIFIPLL(1);
     ef_get_env_blob("dongle-headphone", headphone, 6, NULL);

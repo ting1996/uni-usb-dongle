@@ -1,57 +1,56 @@
-# Graph Report - uni-usb-dongle  (2026-11-26)
+# Graph Report - uni-usb-dongle  (2026-11-27)
 
 ## Corpus Check
-- 110 files · ~111,193 words
+- 115 files · ~118,144 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 16 file(s) not represented in the graph (top: (none) 8, .bin 3, .ota 3)
 
 ## Summary
-- 1434 nodes · 3455 edges · 79 communities (57 shown, 22 thin omitted)
-- Extraction: 85% EXTRACTED · 15% INFERRED · 0% AMBIGUOUS · INFERRED: 504 edges (avg confidence: 0.85)
+- 1530 nodes · 3763 edges · 85 communities (61 shown, 24 thin omitted)
+- Extraction: 86% EXTRACTED · 14% INFERRED · 0% AMBIGUOUS · INFERRED: 522 edges (avg confidence: 0.85)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `6e2ef2f8`
+- Built from commit: `c7b5d672`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
 - a2dp_source.c
 - protocol.mjs
-- find_peer
+- bumble_stress_test.py
 - windows.ps1
 - bluetooth.c
 - usb_hid_transport.c
 - struct
 - usb_gamepad_check.py
 - a2dp_encoder.c
-- find_peer
+- usb_ota_service.c
 - usb_hid_check.py
 - usb_gamepad.c
-- usb_audio_check.py
+- bumble_stress_test.py
 - with
-- run_dualsense
+- on_int_channel
 - output_profile_test.c
 - with
 - settings_store.c
 - usb_gamepad_backend_test.c
+- bl616_pt_check.py
 - mic_pipeline.c
 - app.mjs
 - usb_profiles.c
 - deploy-pages.yml
-- bl616_pt_check.py
-- HidPort
-- deepseek_runner.py
-- steps
-- gamepad_out_complete
-- main
-- audio_stream.c
-- sys
+- status_led.c
+- dualsense_haptics.c
 - hfp_ag.c
+- steps
+- dongle_usb_ota_service_start
+- gamepad_out_complete
+- ds_lock
 - build_web_pages.mjs
 - publish-nightly
-- dualsense_haptics.c
-- string
+- audio_stream.c
+- RepoConfigTests
 - force
 - with
 - outputs
@@ -60,33 +59,40 @@
 - env
 - firmware-build
 - host-tests
-- run_sink
+- make_handlers
 - refreshAll
 - dualsense.c
-- pathlib
-- dongle_bluetooth_start
-- ds_lock
-- publish-nightly
-- radio_task
-- suspend_other_tasks_for_ota
-- usb_ota_service.c
-- argparse
-- usb_ota_service.c
-- dongle_bluetooth_start
+- bl616_pt_check.py
+- dongle_catalog_address_is_valid
+- disconnected
 - status_led.c
+- publish-nightly
+- hfp_ag_sync_mic_state
+- run_dualsense
+- suspend_other_tasks_for_ota
+- ds_audio_task
+- argparse
+- radio_task
+- deepseek_runner.py
 - bluetooth_storage.c
+- run_sink
+- test_usb_audio_check.py
+- StreamTelemetry
+- dongle_bluetooth_start
+- BumbleStressTestUnitTests
+- Bl616PtCheckTests
 
 ## God Nodes (most connected - your core abstractions)
 1. `usb_ota_task()` - 45 edges
-2. `radio_task()` - 35 edges
-3. `_request()` - 25 edges
-4. `xTaskGetTickCount()` - 23 edges
-5. `wireEvents()` - 21 edges
-6. `dongle_a2dp_source_t` - 21 edges
-7. `main()` - 20 edges
-8. `refreshAll()` - 19 edges
-9. `main()` - 19 edges
-10. `HidPort` - 18 edges
+2. `radio_task()` - 36 edges
+3. `HidPort` - 30 edges
+4. `_request()` - 27 edges
+5. `xTaskGetTickCount()` - 23 edges
+6. `wireEvents()` - 21 edges
+7. `dongle_a2dp_source_t` - 21 edges
+8. `HardwareTestRunner` - 20 edges
+9. `main()` - 20 edges
+10. `main()` - 19 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `a2dp_open_media_cb()` --calls--> `dongle_a2dp_source_media_connected()`  [INFERRED]
@@ -103,19 +109,19 @@
 ## Import Cycles
 - None detected.
 
-## Communities (79 total, 22 thin omitted)
+## Communities (85 total, 24 thin omitted)
 
 ### Community 0 - "a2dp_source.c"
-Cohesion: 0.13
-Nodes (36): a2dp_sig_connected(), dongle_a2dp_remote_sep_t, dongle_a2dp_source_callbacks_t, dongle_a2dp_source_t, build_codec_config(), classify_codec(), codec_for_local_seid(), dongle_a2dp_source_close() (+28 more)
+Cohesion: 0.12
+Nodes (39): a2dp_on_state_cb(), a2dp_sig_connected(), dongle_a2dp_remote_sep_t, dongle_a2dp_source_callbacks_t, dongle_a2dp_source_t, dongle_a2dp_stream_state_t, build_codec_config(), classify_codec() (+31 more)
 
 ### Community 1 - "protocol.mjs"
 Cohesion: 0.13
 Nodes (29): capabilityNames(), handleApplyProfile(), refreshMetricsAndDiag(), renderOverviewAndProfile(), requestOptional(), resetSnapshot(), AUDIO_CODEC, audioCodecLabel() (+21 more)
 
-### Community 2 - "find_peer"
-Cohesion: 0.13
-Nodes (16): a2dp_media_connected(), a2dp_media_disconnected(), a2dp_on_error_cb(), a2dp_on_state_cb(), a2dp_sig_disconnected(), accept_control(), accept_input(), audio_failure() (+8 more)
+### Community 2 - "bumble_stress_test.py"
+Cohesion: 0.14
+Nodes (16): build_sine_tone_pcm(), play_tone_on_dongle(), play_tone_stream_windows(), analyze_pcm16_mono(), analyze_sbc_rtp_packet(), _dongle_vid_pid_tags(), _find_windows_wave_device(), find_windows_wavein_device() (+8 more)
 
 ### Community 3 - "windows.ps1"
 Cohesion: 0.14
@@ -123,15 +129,15 @@ Nodes (41): ConvertFrom-JUnitXml(), ConvertTo-NormalizedPathForCompare(), Find-B
 
 ### Community 4 - "bluetooth.c"
 Cohesion: 0.05
-Nodes (15): a2dp_open_media_cb(), a2dp_send_l2cap(), a2dp_sig_recv(), a2dp_sig_send_cb(), configure_packet_type(), configure_qos(), configure_supervision_timeout(), dongle_bluetooth_bind_blocklist() (+7 more)
+Nodes (22): a2dp_media_connected(), a2dp_media_disconnected(), a2dp_open_media_cb(), a2dp_send_l2cap(), a2dp_sig_disconnected(), a2dp_sig_recv(), a2dp_sig_send_cb(), accept_control() (+14 more)
 
 ### Community 5 - "usb_hid_transport.c"
-Cohesion: 0.13
+Cohesion: 0.12
 Nodes (27): dongle_usb_hid_get_feature(), dongle_usb_hid_reply(), dongle_usb_hid_reply_seen(), dongle_usb_hid_reset(), dongle_usb_hid_set_feature(), dongle_usb_hid_take(), lock(), unlock() (+19 more)
 
 ### Community 6 - "struct"
-Cohesion: 0.15
-Nodes (13): FakeDevice, make_test_image(), UsbOtaTests, decode_feature(), decode_frame(), encode_frame(), main(), probe() (+5 more)
+Cohesion: 0.12
+Nodes (15): FakeDevice, make_test_image(), UsbOtaTests, rts_reset_dongle(), decode_feature(), feature_fragments(), decode_frame(), encode_frame() (+7 more)
 
 ### Community 7 - "usb_gamepad_check.py"
 Cohesion: 0.12
@@ -141,29 +147,29 @@ Nodes (14): UsbGamepadCheckTests, check_gamepads(), wait_for(), check_gamepads_w
 Cohesion: 0.12
 Nodes (21): dongle_a2dp_encoder_close(), dongle_a2dp_encoder_encode(), dongle_a2dp_encoder_frame_samples(), dongle_a2dp_encoder_on_tx_congestion(), dongle_a2dp_encoder_open(), dongle_a2dp_encoder_set_controller_active(), audio_task(), bw_write_bits() (+13 more)
 
-### Community 9 - "find_peer"
-Cohesion: 0.24
-Nodes (14): a2dp_on_controller_coex_changed(), channel_disconnected(), channel_peer(), connected_controllers_locked(), control_connected(), disconnected(), dongle_bluetooth_connected(), dongle_bluetooth_connected_devices() (+6 more)
+### Community 9 - "usb_ota_service.c"
+Cohesion: 0.12
+Nodes (30): dongle_bluetooth_audio_metrics(), dongle_bluetooth_ready(), dongle_usb_audio_metrics(), dongle_usb_gamepad_diagnostics(), abort_session(), begin_update(), dongle_usb_ota_active(), finish_update() (+22 more)
 
 ### Community 10 - "usb_hid_check.py"
-Cohesion: 0.12
-Nodes (27): HidCheckTests, _request(), block_device(), decode_blocklist(), decode_dualsense_metrics(), decode_mic_state(), decode_profile_state(), feature_fragments() (+19 more)
+Cohesion: 0.11
+Nodes (26): HidCheckTests, _request(), block_device(), decode_blocklist(), decode_dualsense_metrics(), decode_mic_state(), decode_profile_state(), find_windows_hid_devices() (+18 more)
 
 ### Community 11 - "usb_gamepad.c"
 Cohesion: 0.10
-Nodes (29): dongle_bluetooth_local_address(), dongle_mic_pipeline_set_hfp_state(), dongle_mic_pipeline_set_source(), dongle_usb_audio_event(), active_gamepad_count(), dongle_usb_gamepad_dualsense_raw(), dongle_usb_gamepad_event(), dongle_usb_gamepad_submit_dualsense() (+21 more)
+Nodes (32): dongle_bluetooth_local_address(), ds_audio_received(), active_gamepad_count(), dongle_usb_gamepad_dualsense_raw(), dongle_usb_gamepad_event(), dongle_usb_gamepad_sink(), dongle_usb_gamepad_submit_dualsense(), dongle_usb_gamepad_test() (+24 more)
 
-### Community 12 - "usb_audio_check.py"
-Cohesion: 0.17
-Nodes (13): analyze_pcm16_mono(), analyze_sbc_rtp_packet(), _dongle_vid_pid_tags(), _find_windows_wave_device(), find_windows_wavein_device(), find_windows_waveout_device(), main(), pcm_device() (+5 more)
+### Community 12 - "bumble_stress_test.py"
+Cohesion: 0.15
+Nodes (12): radio_state(), BumbleProcess, compute_radio_deltas(), disconnect_targets(), evaluate_audio_metrics(), evaluate_controller_metrics(), HardwareTestRunner, _on_soak_progress() (+4 more)
 
 ### Community 13 - "with"
 Cohesion: 0.06
 Nodes (37): concurrency, cancel-in-progress, group, name, runs-on, steps, name, runs-on (+29 more)
 
-### Community 14 - "run_dualsense"
-Cohesion: 0.11
-Nodes (17): build_feature_report(), build_input_report_31(), ds_crc32(), DualSenseTelemetry, main(), make_hid_sdp_records(), parse_args(), run_dualsense() (+9 more)
+### Community 14 - "on_int_channel"
+Cohesion: 0.23
+Nodes (11): build_feature_report(), build_input_report_31(), ds_crc32(), _disable_scan(), on_ctrl_channel(), on_open(), on_sdu(), on_int_channel() (+3 more)
 
 ### Community 15 - "output_profile_test.c"
 Cohesion: 0.23
@@ -175,59 +181,55 @@ Nodes (37): GH_TOKEN, name, runs-on, steps, name, runs-on, steps, jobs (+29 more
 
 ### Community 17 - "settings_store.c"
 Cohesion: 0.08
-Nodes (33): dongle_app_task(), dongle_settings_store_close(), dongle_settings_store_init(), dongle_settings_store_load(), dongle_settings_store_save(), partition_state(), store_give(), store_take() (+25 more)
+Nodes (34): dongle_app_task(), dongle_settings_store_close(), dongle_settings_store_init(), dongle_settings_store_load(), dongle_settings_store_save(), partition_state(), store_give(), store_take() (+26 more)
 
 ### Community 18 - "usb_gamepad_backend_test.c"
-Cohesion: 0.10
-Nodes (12): gamepad_complete(), assert_fifo_exclusivity(), complete_both(), deliver_out(), dongle_usb_profile(), dongle_usb_profile_dualsense_poll_rate(), dongle_usb_profile_gamepad_count(), dongle_usb_profile_gamepad_out_ep() (+4 more)
+Cohesion: 0.11
+Nodes (10): assert_fifo_exclusivity(), complete_both(), deliver_out(), dongle_usb_profile(), dongle_usb_profile_dualsense_poll_rate(), dongle_usb_profile_gamepad_count(), dongle_usb_profile_gamepad_out_ep(), dongle_usb_profile_mgmt_interface() (+2 more)
+
+### Community 19 - "bl616_pt_check.py"
+Cohesion: 0.25
+Nodes (8): _decode_name(), _extract_active_fw(), format_report(), _infer_base_offset(), inspect_dump(), main(), _parse_int_auto(), parse_table()
 
 ### Community 20 - "mic_pipeline.c"
-Cohesion: 0.12
-Nodes (19): dongle_mic_pipeline_desired_ds_slot(), dongle_mic_pipeline_desired_hfp_sco(), dongle_mic_pipeline_feed_dualsense_opus(), dongle_mic_pipeline_init(), dongle_mic_pipeline_metrics(), drain_opus_ring(), drain_sco_ring(), feed_sco_msbc_chunk() (+11 more)
+Cohesion: 0.13
+Nodes (19): dongle_mic_pipeline_desired_ds_slot(), dongle_mic_pipeline_desired_hfp_sco(), dongle_mic_pipeline_feed_dualsense_opus(), dongle_mic_pipeline_init(), dongle_mic_pipeline_metrics(), dongle_mic_pipeline_set_source(), drain_opus_ring(), drain_sco_ring() (+11 more)
 
 ### Community 21 - "app.mjs"
 Cohesion: 0.14
 Nodes (32): activateTab(), applyTheme(), disconnectClient(), discoveryEntries, elements, formatRumbleGainLabel(), handleAbortOta(), handleApplyMicSource() (+24 more)
 
 ### Community 22 - "usb_profiles.c"
-Cohesion: 0.16
-Nodes (19): dongle_bluetooth_active_audio_codec(), dongle_bluetooth_set_audio_codec(), dongle_usb_gamepad_generic_descriptor(), usb_ota_config_descriptor_callback(), usb_ota_other_speed_descriptor_callback(), apply_device_identity(), dongle_usb_profile_activate(), dongle_usb_profile_complete() (+11 more)
+Cohesion: 0.18
+Nodes (18): dongle_bluetooth_active_audio_codec(), dongle_bluetooth_set_audio_codec(), dongle_usb_gamepad_generic_descriptor(), usb_ota_device_descriptor_callback(), apply_device_identity(), dongle_usb_profile_activate(), dongle_usb_profile_config(), dongle_usb_profile_device() (+10 more)
 
 ### Community 23 - "deploy-pages.yml"
 Cohesion: 0.07
 Nodes (31): runs-on, steps, concurrency, cancel-in-progress, group, environment, needs, runs-on (+23 more)
 
-### Community 24 - "bl616_pt_check.py"
-Cohesion: 0.24
-Nodes (8): _decode_name(), _extract_active_fw(), format_report(), _infer_base_offset(), inspect_dump(), main(), _parse_int_auto(), parse_table()
+### Community 25 - "dualsense_haptics.c"
+Cohesion: 0.19
+Nodes (16): dongle_usb_audio_event(), dongle_usb_audio_get_rumble_gain(), dongle_usb_audio_set_rumble_gain(), usbd_audio_close(), abs_diff_u8(), abs_s16_le(), dongle_ds_haptics_get_gain(), dongle_ds_haptics_init() (+8 more)
 
-### Community 26 - "deepseek_runner.py"
-Cohesion: 0.05
-Nodes (21): DeepSeekRunnerTests, _fake_urlopen(), _FakeHttpResponse, _parse_jobs(), _read(), RepoConfigTests, build_arg_parser(), build_request_payload() (+13 more)
+### Community 26 - "hfp_ag.c"
+Cohesion: 0.30
+Nodes (9): dongle_hfp_ag_feed(), dongle_hfp_ag_request_codec(), emit_str(), handle_line(), parse_codec_list(), parse_uint(), starts_with_ci(), main() (+1 more)
 
 ### Community 27 - "steps"
 Cohesion: 0.08
 Nodes (23): default, description, required, description, inputs, board, out-dir, name (+15 more)
 
-### Community 28 - "gamepad_out_complete"
-Cohesion: 0.17
-Nodes (16): dongle_bluetooth_set_usb_sample_rate(), audio_received(), db_to_q15_gain(), fill_mic_frame(), mic_sent(), usbd_audio_get_sampling_freq(), usbd_audio_open(), usbd_audio_set_sampling_freq() (+8 more)
+### Community 31 - "dongle_usb_ota_service_start"
+Cohesion: 0.18
+Nodes (13): dongle_bluetooth_bind_blocklist(), dongle_bluetooth_set_rumble_gain(), dongle_usb_audio_attach(), dongle_usb_audio_attach_headphone(), dongle_usb_audio_register(), dongle_usb_gamepad_attach(), dongle_usb_gamepad_register(), attach_usb_stack() (+5 more)
 
-### Community 31 - "main"
-Cohesion: 0.19
-Nodes (13): dongle_bluetooth_set_rumble_gain(), dongle_usb_audio_attach(), dongle_usb_audio_attach_headphone(), dongle_usb_audio_register(), dongle_usb_gamepad_attach(), dongle_usb_gamepad_register(), attach_usb_stack(), dongle_usb_ota_service_start() (+5 more)
+### Community 33 - "gamepad_out_complete"
+Cohesion: 0.23
+Nodes (10): audio_received(), db_to_q15_gain(), fill_mic_frame(), mic_sent(), usbd_audio_get_sampling_freq(), usbd_audio_open(), usb_ota_string_descriptor_callback(), usb_write() (+2 more)
 
-### Community 32 - "audio_stream.c"
-Cohesion: 0.22
-Nodes (12): copy_from_ring(), copy_into_ring(), dongle_audio_format_is_supported(), dongle_audio_sbc_rtp_timestamp(), dongle_audio_stream_init(), dongle_audio_stream_read(), dongle_audio_stream_write(), main() (+4 more)
-
-### Community 33 - "sys"
-Cohesion: 0.14
-Nodes (5): UartMonitorTest, _build_sbc_rtp_packet(), UsbAudioCheckTests, main(), open_uart()
-
-### Community 34 - "hfp_ag.c"
-Cohesion: 0.30
-Nodes (9): dongle_hfp_ag_feed(), dongle_hfp_ag_request_codec(), emit_str(), handle_line(), parse_codec_list(), parse_uint(), starts_with_ci(), main() (+1 more)
+### Community 34 - "ds_lock"
+Cohesion: 0.20
+Nodes (18): dongle_bluetooth_dualsense_feature(), dongle_bluetooth_dualsense_metrics(), dongle_bluetooth_dualsense_mic_active(), dongle_bluetooth_send_dualsense_audio_haptics(), dongle_bluetooth_send_dualsense_feature(), dongle_bluetooth_send_dualsense_output(), dongle_bluetooth_send_dualsense_output_ex(), dongle_bluetooth_set_dualsense_audio_mute() (+10 more)
 
 ### Community 35 - "build_web_pages.mjs"
 Cohesion: 0.16
@@ -237,9 +239,13 @@ Nodes (11): buildWebPages(), DEFAULT_OUT_DIR, DEFAULT_SOURCE_DIR, isInsideDir(),
 Cohesion: 0.25
 Nodes (7): concurrency, cancel-in-progress, group, jobs, name, permissions, contents
 
-### Community 37 - "dualsense_haptics.c"
+### Community 37 - "audio_stream.c"
+Cohesion: 0.18
+Nodes (15): dongle_bluetooth_set_usb_sample_rate(), usbd_audio_set_sampling_freq(), copy_from_ring(), copy_into_ring(), dongle_audio_format_is_supported(), dongle_audio_sbc_rtp_timestamp(), dongle_audio_stream_init(), dongle_audio_stream_read() (+7 more)
+
+### Community 38 - "RepoConfigTests"
 Cohesion: 0.24
-Nodes (13): dongle_usb_audio_get_rumble_gain(), dongle_usb_audio_set_rumble_gain(), ds_audio_received(), usbd_audio_close(), abs_diff_u8(), abs_s16_le(), dongle_ds_haptics_get_gain(), dongle_ds_haptics_process_4ch() (+5 more)
+Nodes (3): _parse_jobs(), _read(), RepoConfigTests
 
 ### Community 39 - "force"
 Cohesion: 0.20
@@ -273,83 +279,99 @@ Nodes (5): if, name, needs, runs-on, firmware-build
 Cohesion: 0.40
 Nodes (5): if, name, needs, runs-on, host-tests
 
-### Community 48 - "run_sink"
-Cohesion: 0.10
-Nodes (12): build_codec_capabilities(), classify_configured_codec(), main(), parse_args(), run_sink(), _disable_scan(), on_avdtp_connection(), make_handlers() (+4 more)
+### Community 48 - "make_handlers"
+Cohesion: 0.20
+Nodes (6): classify_configured_codec(), _disable_scan(), on_avdtp_connection(), make_handlers(), on_config(), on_start()
 
 ### Community 49 - "refreshAll"
 Cohesion: 0.29
 Nodes (20): appendLog(), handleBlockAddress(), handleDisconnectAddress(), handlePairDevice(), handleRemoveAudio(), handleRemoveSlot(), handleSelectSlot(), handleUnblockAddress() (+12 more)
 
 ### Community 51 - "dualsense.c"
-Cohesion: 0.18
-Nodes (23): crc_byte(), dongle_dualsense_bt_to_usb_input(), dongle_dualsense_bt_unlock_leds(), dongle_dualsense_crc32(), dongle_dualsense_from_switch_rumble(), dongle_dualsense_from_xinput_output(), dongle_dualsense_input(), dongle_dualsense_merge_usb_output() (+15 more)
+Cohesion: 0.17
+Nodes (26): dongle_dualsense_bt_feature_to_usb(), dongle_dualsense_bt_to_usb_input(), dongle_dualsense_bt_unlock_leds(), dongle_dualsense_crc32(), dongle_dualsense_feature_size(), dongle_dualsense_from_ps4_output(), dongle_dualsense_from_switch_rumble(), dongle_dualsense_from_xinput_output() (+18 more)
 
-### Community 52 - "pathlib"
-Cohesion: 0.15
-Nodes (4): Bl616PtCheckTests, _build_bfpt_table(), _build_dual_8k_dump(), M62FlashPlanTests
+### Community 52 - "bl616_pt_check.py"
+Cohesion: 0.09
+Nodes (10): M62FlashPlanTests, UartMonitorTest, main(), parse_args(), resolve_python_exe(), resolve_scenarios(), scan_uart_anomalies(), ScenarioResult (+2 more)
 
-### Community 53 - "dongle_bluetooth_start"
+### Community 53 - "dongle_catalog_address_is_valid"
 Cohesion: 0.18
 Nodes (21): load_blocklist(), load_prefs(), save_blocklist(), save_prefs(), dongle_codec_crc32(), dongle_codec_read_le32(), dongle_codec_write_le32(), blocklist_is_valid() (+13 more)
 
-### Community 54 - "ds_lock"
+### Community 54 - "disconnected"
+Cohesion: 0.31
+Nodes (11): a2dp_on_controller_coex_changed(), channel_disconnected(), channel_peer(), control_connected(), disconnected(), dongle_bluetooth_connected(), input_connected(), release_sco_active_conn() (+3 more)
+
+### Community 55 - "status_led.c"
 Cohesion: 0.25
-Nodes (14): dongle_bluetooth_dualsense_feature(), dongle_bluetooth_dualsense_metrics(), dongle_bluetooth_send_dualsense_audio_haptics(), dongle_bluetooth_send_dualsense_feature(), dongle_bluetooth_send_dualsense_output(), dongle_bluetooth_send_dualsense_output_ex(), ds_lock(), ds_now_ticks() (+6 more)
+Nodes (5): dongle_status_led_set_ota(), dongle_status_led_start(), set_rgb_channel_enabled(), set_rgb_mask(), status_led_task()
 
 ### Community 56 - "publish-nightly"
 Cohesion: 0.40
 Nodes (5): publish-nightly, if, name, needs, runs-on
 
-### Community 57 - "radio_task"
-Cohesion: 0.16
-Nodes (14): ds_send_l2cap_report(), effective_a2dp_codec(), hfp_ag_reset_state(), hfp_ag_sync_mic_state(), hfp_dlc_connected_cb(), hfp_dlc_disconnected_cb(), hfp_dlc_recv_cb(), hfp_rfcomm_tx() (+6 more)
+### Community 57 - "hfp_ag_sync_mic_state"
+Cohesion: 0.38
+Nodes (7): hfp_ag_reset_state(), hfp_ag_sync_mic_state(), hfp_dlc_connected_cb(), hfp_dlc_disconnected_cb(), hfp_dlc_recv_cb(), hfp_rfcomm_tx(), dongle_hfp_ag_init()
+
+### Community 58 - "run_dualsense"
+Cohesion: 0.20
+Nodes (6): DualSenseTelemetry, main(), make_hid_sdp_records(), parse_args(), run_dualsense(), on_connection()
 
 ### Community 59 - "suspend_other_tasks_for_ota"
 Cohesion: 0.31
 Nodes (14): dongle_bluetooth_ota_is_suspended(), dongle_bluetooth_set_ota_suspended(), dongle_mic_pipeline_ota_is_suspended(), dongle_mic_pipeline_set_ota_suspended(), dongle_usb_audio_ota_is_suspended(), dongle_usb_audio_set_ota_suspended(), dongle_usb_gamepad_ota_is_suspended(), dongle_usb_gamepad_set_ota_suspended() (+6 more)
 
-### Community 61 - "usb_ota_service.c"
-Cohesion: 0.12
-Nodes (27): dongle_bluetooth_audio_metrics(), dongle_bluetooth_disconnect_address(), dongle_bluetooth_ready(), dongle_bluetooth_removed(), dongle_status_led_set_ota(), dongle_usb_audio_metrics(), dongle_usb_gamepad_diagnostics(), abort_session() (+19 more)
+### Community 61 - "ds_audio_task"
+Cohesion: 0.35
+Nodes (9): dongle_bluetooth_dualsense_headset_plugged(), ds_audio_task(), clamp_s16(), clamp_s8(), dongle_ds_audio_build_report_39(), dongle_ds_audio_decimate_haptics(), dongle_ds_audio_resample_512_480(), main() (+1 more)
 
 ### Community 63 - "argparse"
-Cohesion: 0.15
-Nodes (12): FakeDevice, make_state(), UsbDeviceCheckTests, address(), format_address(), main(), radio_state(), check_device() (+4 more)
-
-### Community 65 - "usb_ota_service.c"
 Cohesion: 0.16
-Nodes (6): main(), package_header_is_valid(), packet_checksum(), read_u32_le(), usb_ota_device_descriptor_callback(), dongle_usb_profile_device()
+Nodes (11): FakeDevice, make_state(), UsbDeviceCheckTests, address(), format_address(), main(), check_device(), ControllerState (+3 more)
 
-### Community 66 - "dongle_bluetooth_start"
+### Community 66 - "radio_task"
 Cohesion: 0.11
-Nodes (18): address_out(), avrcp_chain(), connected(), disable_default_link_policy(), dongle_bluetooth_command(), dongle_bluetooth_remove_audio(), dongle_bluetooth_start(), inquiry_complete() (+10 more)
+Nodes (20): a2dp_on_error_cb(), audio_failure(), configure_packet_type(), configure_qos(), configure_supervision_timeout(), dongle_bluetooth_send_dualsense_audio_report(), ds_send_l2cap_report(), effective_a2dp_codec() (+12 more)
 
-### Community 77 - "status_led.c"
-Cohesion: 0.32
-Nodes (3): dongle_status_led_start(), set_rgb_channel_enabled(), set_rgb_mask()
+### Community 67 - "deepseek_runner.py"
+Cohesion: 0.06
+Nodes (19): DeepSeekRunnerTests, _fake_urlopen(), _FakeHttpResponse, UartCapture, build_arg_parser(), build_request_payload(), build_user_prompt(), capture_git_diff() (+11 more)
 
-### Community 80 - "bluetooth_storage.c"
+### Community 72 - "bluetooth_storage.c"
 Cohesion: 0.27
 Nodes (6): dongle_bluetooth_storage_bind(), path_for(), __wrap_easyflash_init(), __wrap_ef_del_env(), __wrap_ef_get_env_blob_offset(), __wrap_ef_set_env_blob()
 
+### Community 73 - "run_sink"
+Cohesion: 0.29
+Nodes (5): build_codec_capabilities(), main(), parse_args(), run_sink(), on_connection()
+
+### Community 77 - "dongle_bluetooth_start"
+Cohesion: 0.13
+Nodes (14): address_out(), avrcp_chain(), configure_page_scan_activity(), connected(), disable_default_link_policy(), dongle_bluetooth_command(), dongle_bluetooth_remove_audio(), dongle_bluetooth_start() (+6 more)
+
+### Community 80 - "Bl616PtCheckTests"
+Cohesion: 0.43
+Nodes (3): Bl616PtCheckTests, _build_bfpt_table(), _build_dual_8k_dump()
+
 ## Knowledge Gaps
-- **22 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **24 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `usb_ota_task()` connect `usb_ota_service.c` to `usb_ota_service.c`, `dongle_bluetooth_start`, `dualsense_haptics.c`, `usb_hid_transport.c`, `find_peer`, `usb_gamepad.c`, `settings_store.c`, `mic_pipeline.c`, `dongle_bluetooth_start`, `ds_lock`, `usb_profiles.c`, `suspend_other_tasks_for_ota`, `gamepad_out_complete`, `main`?**
-  _High betweenness centrality (0.017) - this node is a cross-community bridge._
+- **Why does `radio_task()` connect `radio_task` to `a2dp_source.c`, `ds_lock`, `bluetooth.c`, `usb_ota_service.c`, `dongle_bluetooth_start`, `dualsense.c`, `mic_pipeline.c`, `disconnected`, `hfp_ag_sync_mic_state`, `hfp_ag.c`, `suspend_other_tasks_for_ota`?**
+  _High betweenness centrality (0.023) - this node is a cross-community bridge._
 - **Are the 30 inferred relationships involving `usb_ota_task()` (e.g. with `dongle_bluetooth_audio_metrics()` and `dongle_bluetooth_command()`) actually correct?**
   _`usb_ota_task()` has 30 INFERRED edges - model-reasoned connections that need verification._
 - **Should `a2dp_source.c` be split into smaller, more focused modules?**
-  _Cohesion score 0.13424947145877378 - nodes in this community are weakly interconnected._
-- **Why does `radio_task()` connect `radio_task` to `a2dp_source.c`, `dongle_bluetooth_start`, `find_peer`, `bluetooth.c`, `hfp_ag.c`, `dualsense.c`, `mic_pipeline.c`, `ds_lock`, `suspend_other_tasks_for_ota`, `usb_ota_service.c`?**
-  _High betweenness centrality (0.012) - this node is a cross-community bridge._
+  _Cohesion score 0.12210915818686402 - nodes in this community are weakly interconnected._
+- **Why does `HidPort` connect `bumble_stress_test.py` to `bumble_stress_test.py`, `struct`, `usb_gamepad_check.py`, `usb_hid_check.py`, `bl616_pt_check.py`, `argparse`?**
+  _High betweenness centrality (0.019) - this node is a cross-community bridge._
 - **Are the 19 inferred relationships involving `radio_task()` (e.g. with `dongle_mic_pipeline_desired_ds_slot()` and `dongle_mic_pipeline_desired_hfp_sco()`) actually correct?**
   _`radio_task()` has 19 INFERRED edges - model-reasoned connections that need verification._
 - **Should `protocol.mjs` be split into smaller, more focused modules?**
   _Cohesion score 0.12903225806451613 - nodes in this community are weakly interconnected._
-- **Why does `run_dualsense()` connect `run_dualsense` to `bumble_dualsense.py`?**
-  _High betweenness centrality (0.008) - this node is a cross-community bridge._
+- **Why does `usb_ota_task()` connect `usb_ota_service.c` to `ds_lock`, `bluetooth.c`, `usb_hid_transport.c`, `usb_gamepad.c`, `dongle_bluetooth_start`, `settings_store.c`, `mic_pipeline.c`, `dongle_catalog_address_is_valid`, `disconnected`, `usb_profiles.c`, `dualsense_haptics.c`, `suspend_other_tasks_for_ota`, `dongle_usb_ota_service_start`?**
+  _High betweenness centrality (0.018) - this node is a cross-community bridge._

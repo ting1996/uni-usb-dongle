@@ -83,6 +83,7 @@ target_sources(app PRIVATE
     ../src/core/device_blocklist.c
     ../src/core/device_catalog.c
     ../src/core/dualsense.c
+    ../src/core/dualsense_audio.c
     ../src/core/dualsense_haptics.c
     ../src/core/dualsense_mic.c
     ../src/core/gamepad_router.c
@@ -104,7 +105,7 @@ target_sources(app PRIVATE
     src/usb_ota_service.c
     src/usb_profiles.c
 )
-target_link_libraries(app ${BL_SDK_BASE}/components/multimedia/opus/libopus.a)
+target_link_libraries(app ${BL_SDK_BASE}/components/multimedia/opus/libopus.a m)
 sdk_set_main_file(main.c)
 
 project(uni_usb_dongle)

@@ -6,7 +6,7 @@ void vAssertCalled(void);
 #endif
 
 #define configUSE_PREEMPTION                    1
-#define configUSE_IDLE_HOOK                     0
+#define configUSE_IDLE_HOOK                     1
 #define configUSE_TICK_HOOK                     0
 /* This SDK port uses configCPU_CLOCK_HZ for MTIME, not the CPU core.
  * BL616 board_init configures MTIME at 1 MHz while the CPU runs at 320 MHz. */

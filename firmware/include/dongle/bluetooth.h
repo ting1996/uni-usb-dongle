@@ -30,6 +30,13 @@ void dongle_bluetooth_send_dualsense_output_ex(
     uint8_t slot, const uint8_t *usb_report, size_t size, uint8_t path_flags);
 void dongle_bluetooth_send_dualsense_audio_haptics(
     uint8_t slot, uint8_t motor_left, uint8_t motor_right);
+int dongle_bluetooth_send_dualsense_audio_report(
+    uint8_t slot, const uint8_t report[547]);
+bool dongle_bluetooth_dualsense_headset_plugged(uint8_t slot);
+bool dongle_bluetooth_dualsense_mic_active(uint8_t slot);
+void dongle_bluetooth_set_dualsense_audio_volume(
+    uint8_t slot, uint8_t spk_vol, uint8_t hp_vol);
+void dongle_bluetooth_set_dualsense_audio_mute(uint8_t slot, bool mute);
 void dongle_bluetooth_set_rumble_gain(uint16_t gain_pct);
 bool dongle_bluetooth_send_dualsense_feature(
     uint8_t slot, const uint8_t *usb_report, size_t size);
